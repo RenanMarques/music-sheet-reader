@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leitor de Partituras</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>𝄞 Leitor de Partituras</h1>
+    <p>Envie um PDF, imagem ou MusicXML, ouça a partitura e isole as vozes.</p>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.xml,.musicxml,.mxl" hidden>
+        <strong>Arraste uma partitura aqui</strong>
+        <span>ou clique para escolher</span>
+        <small>PDF · PNG/JPG/TIFF · MusicXML (.xml/.musicxml/.mxl)</small>
+      </label>
+      <h2>Partituras</h2>
+      <ul id="score-list" class="score-list"><li class="muted">Nenhuma ainda.</li></ul>
+    </aside>
+
+    <section class="content">
+      <div id="empty" class="panel empty">
+        <p>Escolha ou envie uma partitura para começar.</p>
+      </div>
+
+      <div id="status" class="panel status" hidden>
+        <div class="spinner"></div>
+        <div>
+          <strong id="status-title">Processando…</strong>
+          <p id="status-text" class="muted"></p>
+        </div>
+      </div>
+
+      <div id="error" class="panel error" hidden></div>
+
+      <div id="player" hidden>
+        <div class="panel">
+          <div class="score-head">
+            <div>
+              <h2 id="score-title"></h2>
+              <p id="score-info" class="muted"></p>
+            </div>
+            <div class="links">
+              <a id="link-source" target="_blank" rel="noopener">Ver original</a>
+              <a id="link-xml">Baixar MusicXML</a>
+            </div>
+          </div>
+
+          <div class="transport">
+            <button id="btn-play" class="primary" title="Tocar / pausar (espaço)">▶ Tocar</button>
+            <button id="btn-stop" title="Parar">■</button>
+            <div class="seek">
+              <input type="range" id="seek" min="0" max="100" step="0.01" value="0">
+              <span id="position" class="mono">Compasso 1</span>
+            </div>
+          </div>
+
+          <div class="controls">
+            <label>Andamento <input type="range" id="tempo" min="30" max="220" step="1"> <span id="tempo-value" class="mono"></span> bpm</label>
+            <label>Timbre
+              <select id="timbre">
+                <option value="triangle">Suave</option>
+                <option value="sine">Senoidal</option>
+                <option value="fatsawtooth">Coro</option>
+                <option value="square">Órgão</option>
+                <option value="sawtooth">Metais</option>
+              </select>
+            </label>
+            <label><input type="checkbox" id="loop"> Repetir</label>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="voices-head">
+            <h3 id="voices-title">Vozes</h3>
+            <div class="quick" id="quick"></div>
+          </div>
+          <div id="voices" class="voices"></div>
+        </div>
+
+        <div class="panel notice">
+          O reconhecimento automático (OMR) pode errar notas ou ritmos. Para corrigir, baixe o MusicXML,
+          edite em um editor como o MuseScore e envie o arquivo corrigido.
+        </div>
+
+        <div class="panel score-panel">
+          <div id="osmd"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/vendor/Tone.js"></script>
+  <script src="/vendor/opensheetmusicdisplay.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

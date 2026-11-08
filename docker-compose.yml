@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    image: music-sheet-reader
+    ports:
+      - "8000:8000"
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./data:/data
+      # Live-edit the frontend without rebuilding (backend changes need a rebuild/restart).
+      - ./frontend:/app/frontend:ro
+    restart: unless-stopped
