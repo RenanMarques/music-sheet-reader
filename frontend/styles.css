@@ -198,6 +198,8 @@ button.ghost:hover { background: var(--bg); }
   background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-size: 1.1rem;
 }
 .transport button.play:hover { filter: brightness(1.1); }
+.transport button.play { display: grid; place-items: center; }
+.transport button.play svg { width: 22px; height: 22px; fill: currentColor; }
 .transport button.square { width: 34px; height: 34px; padding: 0; }
 .seek { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; }
 .seek input { flex: 1; min-width: 80px; }

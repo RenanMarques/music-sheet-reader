@@ -318,26 +318,33 @@
     if (transport.state === "started") {
       transport.pause();
       releaseAll();
+      updatePlayButton(false);
     } else {
       if (transport.ticks / PPQ >= state.analysis.duration) transport.ticks = 0;
       transport.start("+0.05");
+      // The start is scheduled 50 ms ahead, so transport.state still reads "stopped" here.
+      updatePlayButton(true);
     }
-    updatePlayButton();
   }
 
   function stop() {
     transport.stop();
     transport.ticks = 0;
     releaseAll();
-    updatePlayButton();
+    updatePlayButton(false);
     if (state.analysis) updatePosition(0);
     for (let i = 0; i < state.voices.length; i++) showNote(i, null);
   }
 
-  function updatePlayButton() {
-    const playing = transport.state === "started";
-    $("btn-play").textContent = playing ? "❚❚" : "▶";
-    $("btn-play").setAttribute("aria-label", playing ? "Pausar" : "Tocar");
+  const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>';
+  const ICON_PAUSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5.5" width="4" height="13" rx="1"/><rect x="13.5" y="5.5" width="4" height="13" rx="1"/></svg>';
+
+  function updatePlayButton(playing) {
+    const btn = $("btn-play");
+    btn.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+    btn.setAttribute("aria-label", playing ? "Pausar" : "Tocar");
+    btn.title = playing ? "Pausar (espaço)" : "Tocar (espaço)";
+    btn.classList.toggle("playing", playing);
   }
 
   // ------------------------------------------------------------------ mixer
@@ -487,6 +494,7 @@
   setupDropzone();
   setupControls();
   setLibrary(!NARROW.matches || !location.hash.slice(1));
+  updatePlayButton(false);
   openScore(location.hash.slice(1));
   requestAnimationFrame(tick);
 })();
