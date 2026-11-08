@@ -119,11 +119,27 @@ button.ghost:hover { background: var(--bg); }
 
 .notice { max-width: 1100px; margin: 0 auto 12px; font-size: .82rem; color: var(--muted); }
 .sheet {
+  position: relative;
   max-width: 1100px; margin: 0 auto; min-height: 200px;
   background: var(--paper); border: 1px solid var(--line); border-radius: 4px;
   box-shadow: 0 1px 2px rgba(60, 50, 30, .06), 0 8px 24px -12px rgba(60, 50, 30, .18);
   padding: 8px 0 24px;
 }
+
+/* Click-to-seek: hover band, picked measure and the "jump" confirmation shown while playing. */
+.sheet.can-pick { cursor: pointer; }
+.measure-hover, .measure-pick { position: absolute; pointer-events: none; border-radius: 4px; }
+.measure-hover { background: rgba(124, 58, 237, .06); box-shadow: inset 0 0 0 1px rgba(124, 58, 237, .18); }
+.measure-pick { background: rgba(124, 58, 237, .12); box-shadow: inset 0 0 0 2px var(--accent); }
+.jump-pop {
+  position: absolute; z-index: 5; transform: translate(-50%, calc(-100% - 8px));
+  background: var(--accent); color: var(--accent-ink); border: none; border-radius: 999px;
+  padding: 7px 14px; font-size: .85rem; font-weight: 600; white-space: nowrap;
+  box-shadow: 0 6px 18px -6px rgba(76, 29, 149, .55);
+}
+.jump-pop:hover { filter: brightness(1.08); }
+.jump-pop .time-left { display: block; height: 2px; margin-top: 5px; border-radius: 1px; background: rgba(255,255,255,.55); transform-origin: left; animation: drain var(--ttl, 3s) linear forwards; }
+@keyframes drain { to { transform: scaleX(0); } }
 
 /* ------------------------------------------------------------------ console (mixer + transport) */
 
@@ -202,7 +218,17 @@ button.ghost:hover { background: var(--bg); }
 .transport button.play svg { width: 22px; height: 22px; fill: currentColor; }
 .transport button.square { width: 34px; height: 34px; padding: 0; }
 .seek { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; }
-.seek input { flex: 1; min-width: 80px; }
+.seek-track { position: relative; flex: 1; min-width: 80px; display: flex; align-items: center; }
+.seek-track input { flex: 1; margin: 0; position: relative; z-index: 1; }
+/* Ticks sit under the slider; the inset matches the thumb radius so they line up with positions. */
+.seek-ticks { position: absolute; left: 8px; right: 8px; top: 50%; height: 14px; transform: translateY(-50%); pointer-events: none; }
+.seek-ticks span { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--console-line); }
+.seek-ticks span.major { background: var(--console-muted); }
+.seek-bubble {
+  position: absolute; bottom: calc(100% + 8px); transform: translateX(-50%); z-index: 2;
+  background: var(--console-ink); color: var(--console); font-size: .75rem; font-weight: 600;
+  padding: 2px 7px; border-radius: 4px; white-space: nowrap; pointer-events: none;
+}
 .seek .readout { min-width: 13em; }
 .settings { display: flex; align-items: center; gap: 14px; }
 .settings label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -251,5 +277,6 @@ button.ghost:hover { background: var(--bg); }
 @media (prefers-reduced-motion: reduce) {
   .stage { scroll-behavior: auto; }
   .track .led.hit { animation: none; background: var(--c); }
+  .jump-pop .time-left { animation: none; }
   .spinner { animation-duration: 3s; }
 }
