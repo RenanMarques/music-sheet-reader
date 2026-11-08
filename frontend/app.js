@@ -8,8 +8,63 @@
   "use strict";
 
   const COLORS = ["#c026d3", "#ea580c", "#059669", "#2563eb", "#dc2626", "#0891b2", "#7c3aed", "#475569"];
-  const NOTE_NAMES = ["Dó", "Dó♯", "Ré", "Mi♭", "Mi", "Fá", "Fá♯", "Sol", "Lá♭", "Lá", "Si♭", "Si"];
   const POLL_MS = 1500;
+
+  // ------------------------------------------------------------------ settings
+  // Persisted per browser under localStorage "settings". There is no settings screen yet;
+  // change them from the browser console, e.g. leitor.set("noteNames", "solfege").
+
+  const DEFAULT_SETTINGS = {
+    noteNames: "letters", // "letters" → A3, G2 · "solfege" → Lá3, Sol2
+    follow: true, // the score view follows playback
+  };
+
+  const NOTATIONS = {
+    letters: {
+      notes: ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"],
+      majorKeys: ["C♭", "G♭", "D♭", "A♭", "E♭", "B♭", "F", "C", "G", "D", "A", "E", "B", "F♯", "C♯"],
+    },
+    solfege: {
+      notes: ["Dó", "Dó♯", "Ré", "Mi♭", "Mi", "Fá", "Fá♯", "Sol", "Lá♭", "Lá", "Si♭", "Si"],
+      majorKeys: ["Dó♭", "Sol♭", "Ré♭", "Lá♭", "Mi♭", "Si♭", "Fá", "Dó", "Sol", "Ré", "Lá", "Mi", "Si", "Fá♯", "Dó♯"],
+    },
+  };
+
+  const settings = loadSettings();
+
+  function loadSettings() {
+    const out = { ...DEFAULT_SETTINGS };
+    try {
+      const saved = JSON.parse(localStorage.getItem("settings") || "{}");
+      for (const k of Object.keys(DEFAULT_SETTINGS)) if (k in saved) out[k] = saved[k];
+    } catch (_) { /* storage blocked or corrupt: use defaults */ }
+    if (!(out.noteNames in NOTATIONS)) out.noteNames = DEFAULT_SETTINGS.noteNames;
+    return out;
+  }
+
+  function saveSettings() {
+    try { localStorage.setItem("settings", JSON.stringify(settings)); } catch (_) { /* storage blocked */ }
+  }
+
+  /** Changes a setting, saves it and refreshes what depends on it. */
+  function setSetting(key, value) {
+    if (!(key in DEFAULT_SETTINGS)) throw new Error(`Configuração desconhecida: ${key}. Opções: ${Object.keys(DEFAULT_SETTINGS).join(", ")}`);
+    if (key === "noteNames" && !(value in NOTATIONS)) throw new Error(`Use um destes: ${Object.keys(NOTATIONS).join(", ")}`);
+    if (key === "follow") { setFollow(Boolean(value)); return; }
+    settings[key] = value;
+    saveSettings();
+    if (key === "noteNames") refreshNoteNames();
+  }
+
+  function noteName(midi) {
+    return `${NOTATIONS[settings.noteNames].notes[midi % 12]}${Math.floor(midi / 12) - 1}`;
+  }
+
+  function keyName(fifths) {
+    return `${NOTATIONS[settings.noteNames].majorKeys[fifths + 7] || "?"} maior`;
+  }
+
+  window.leitor = { settings, set: setSetting, defaults: DEFAULT_SETTINGS };
 
   const $ = (id) => document.getElementById(id);
   const transport = Tone.getTransport();
@@ -25,7 +80,6 @@
     seeking: false,
     pollTimer: null,
     loadToken: 0,
-    follow: loadFollowPref(),
   };
 
   // ------------------------------------------------------------------ API
@@ -180,9 +234,7 @@
 
   function renderHeader(meta, a) {
     $("score-title").textContent = a.title;
-    const staves = a.staves.map((s) => s.voices).join(" + ");
-    $("score-info").textContent =
-      `${a.voices.length} vozes (${staves} por pauta), ${a.measures} compassos, ${a.time_signature}, ${keyName(a.key_fifths)}`;
+    renderScoreInfo(a);
     $("link-source").href = `/api/scores/${meta.id}/source`;
     $("link-xml").href = `/api/scores/${meta.id}/musicxml`;
     $("tempo").value = Math.round(a.tempo);
@@ -192,9 +244,30 @@
     updatePosition(0);
   }
 
-  function keyName(fifths) {
-    const major = ["Dó♭", "Sol♭", "Ré♭", "Lá♭", "Mi♭", "Si♭", "Fá", "Dó", "Sol", "Ré", "Lá", "Mi", "Si", "Fá♯", "Dó♯"];
-    return `${major[fifths + 7] || "?"} maior`;
+  function renderScoreInfo(a) {
+    const staves = a.staves.map((s) => s.voices).join(" + ");
+    $("score-info").textContent =
+      `${a.voices.length} vozes (${staves} por pauta), ${a.measures} compassos, ${a.time_signature}, ${keyName(a.key_fifths)}`;
+  }
+
+  /** Re-labels everything that shows note names (after the notation setting changes). */
+  function refreshNoteNames() {
+    if (!state.analysis) return;
+    renderScoreInfo(state.analysis);
+    state.analysis.voices.forEach((v, i) => {
+      const el = state.voices[i] && state.voices[i].el;
+      if (!el) return;
+      el.querySelector(".range").textContent = voiceRange(v);
+      const now = el.querySelector(".now");
+      if (now.dataset.midi) now.textContent = noteName(Number(now.dataset.midi));
+    });
+  }
+
+  function voiceRange(v) {
+    if (!v.notes.length) return "";
+    let lo = Infinity, hi = -Infinity;
+    for (const n of v.notes) { lo = Math.min(lo, n.midi); hi = Math.max(hi, n.midi); }
+    return `${noteName(lo)}–${noteName(hi)}`;
   }
 
   // ------------------------------------------------------------------ score rendering + cursor
@@ -213,7 +286,7 @@
       drawPartNames: false,
       followCursor: true,
     });
-    state.osmd.FollowCursor = state.follow;
+    state.osmd.FollowCursor = settings.follow;
     await state.osmd.load(xml);
     state.osmd.render();
     buildCursorSteps();
@@ -241,14 +314,10 @@
 
   // ------------------------------------------------------------------ follow playback
 
-  function loadFollowPref() {
-    try { return localStorage.getItem("follow") !== "0"; } catch (_) { return true; }
-  }
-
   /** Turns "follow the cursor" on/off. Turning it on scrolls straight to the current position. */
   function setFollow(on) {
-    state.follow = on;
-    try { localStorage.setItem("follow", on ? "1" : "0"); } catch (_) { /* storage blocked */ }
+    settings.follow = on;
+    saveSettings();
     if (state.osmd) state.osmd.FollowCursor = on;
     const btn = $("btn-follow");
     btn.classList.toggle("on", on);
@@ -264,7 +333,7 @@
    * to the cursor. Only user gestures count: OSMD's own scrolling fires plain "scroll". */
   function setupAutoDetach() {
     const stage = $("stage");
-    const detach = () => { if (state.follow && transport.state === "started") setFollow(false); };
+    const detach = () => { if (settings.follow && transport.state === "started") setFollow(false); };
     stage.addEventListener("wheel", detach, { passive: true });
     stage.addEventListener("touchmove", detach, { passive: true });
     stage.addEventListener("pointerdown", (e) => {
@@ -404,7 +473,7 @@
         <button class="s" aria-pressed="false">S</button>
         <input type="range" min="-30" max="6" step="1" value="0">`;
       el.querySelector("strong").textContent = v.name;
-      el.querySelector(".range").textContent = `${v.low}–${v.high}`;
+      el.querySelector(".range").textContent = voiceRange(v);
       el.querySelector(".m").title = `Silenciar ${v.name}`;
       el.querySelector(".s").title = `Tocar só ${v.name} (combine várias com S)${i < 9 ? ` · tecla ${i + 1}` : ""}`;
       el.querySelector("input").title = `Volume de ${v.name}`;
@@ -449,8 +518,9 @@
   function showNote(i, midi) {
     const v = state.voices[i];
     if (!v || !v.el) return;
-    v.el.querySelector(".now").textContent =
-      midi == null ? "—" : `${NOTE_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
+    const now = v.el.querySelector(".now");
+    now.textContent = midi == null ? "—" : noteName(midi);
+    now.dataset.midi = midi == null ? "" : String(midi);
     if (midi == null) return;
     const led = v.el.querySelector(".led");
     led.classList.remove("hit");
@@ -517,7 +587,7 @@
     $("timbre").onchange = changeTimbre;
     $("loop").onchange = applyLoop;
     $("btn-all").onclick = resetMixer;
-    $("btn-follow").onclick = () => setFollow(!state.follow);
+    $("btn-follow").onclick = () => setFollow(!settings.follow);
     $("btn-library").onclick = () => setLibrary(!$("app").classList.contains("lib-open"));
     document.addEventListener("keydown", (e) => {
       if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) && e.target.type !== "range") return;
@@ -526,7 +596,7 @@
         e.preventDefault();
         togglePlay();
       } else if (e.code === "KeyF") {
-        setFollow(!state.follow);
+        setFollow(!settings.follow);
       } else if (/^Digit[1-9]$/.test(e.code)) {
         toggleSolo(Number(e.code.slice(5)) - 1);
       }
@@ -538,7 +608,7 @@
   setupControls();
   setLibrary(!NARROW.matches || !location.hash.slice(1));
   updatePlayButton(false);
-  setFollow(state.follow);
+  setFollow(settings.follow);
   setupAutoDetach();
   openScore(location.hash.slice(1));
   requestAnimationFrame(tick);

@@ -39,6 +39,7 @@ Pipeline: upload → (OMR if PDF/image) → MusicXML → `analyze()` → JSON pl
   - Repeats/voltas are expanded into a `timeline` (D.C./D.S. are not). Note times are in quarter notes, already in performance order; each note keeps `m` = original measure index.
   - Voice names: 4 voices total ⇒ Soprano/Contralto/Tenor/Baixo; 1 ⇒ Melodia; else "Voz N".
 - `frontend/` layout is a fixed app shell (CSS grid, `100dvh`): only `.stage` (the score) scrolls, so OSMD's `followCursor` never moves the transport bar (bottom) or the voice mixer (right). Mixer/transport/header meta are shown only while a score is loaded (`show()` in `app.js`); the library is a collapsible column that becomes a drawer below 1100px.
+- User preferences live in the `settings` object at the top of `app.js` (`DEFAULT_SETTINGS`, persisted as JSON in `localStorage["settings"]`): `noteNames` (`"letters"` → A3, default; `"solfege"` → Lá3) and `follow`. There is no settings screen yet; `leitor.set(key, value)` in the browser console changes them. All note/key names in the UI go through `noteName()`/`keyName()` (the backend's `low`/`high` strings are not displayed).
 - `frontend/app.js` — vanilla JS, no build step. Tone.js: one `PolySynth` → `Tone.Channel` → `Tone.Part` per voice (solo/mute use `Channel.solo`/`mute`); times scheduled in ticks so tempo changes apply live. OpenSheetMusicDisplay renders `score.xml`; the cursor is synced by mapping (original measure index, offset in measure) to precomputed cursor steps, which keeps it correct across repeats.
 
 ## Gotchas
