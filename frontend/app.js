@@ -25,6 +25,7 @@
     seeking: false,
     pollTimer: null,
     loadToken: 0,
+    follow: loadFollowPref(),
   };
 
   // ------------------------------------------------------------------ API
@@ -212,6 +213,7 @@
       drawPartNames: false,
       followCursor: true,
     });
+    state.osmd.FollowCursor = state.follow;
     await state.osmd.load(xml);
     state.osmd.render();
     buildCursorSteps();
@@ -235,6 +237,44 @@
     cursor.reset();
     state.steps = steps;
     state.stepIdx = 0;
+  }
+
+  // ------------------------------------------------------------------ follow playback
+
+  function loadFollowPref() {
+    try { return localStorage.getItem("follow") !== "0"; } catch (_) { return true; }
+  }
+
+  /** Turns "follow the cursor" on/off. Turning it on scrolls straight to the current position. */
+  function setFollow(on) {
+    state.follow = on;
+    try { localStorage.setItem("follow", on ? "1" : "0"); } catch (_) { /* storage blocked */ }
+    if (state.osmd) state.osmd.FollowCursor = on;
+    const btn = $("btn-follow");
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-pressed", String(on));
+    btn.title = on
+      ? "Acompanhando a execução. Clique para soltar a tela (F)"
+      : "Tela solta. Clique para voltar a acompanhar a execução (F)";
+    const el = state.osmd && state.osmd.cursor && state.osmd.cursor.cursorElement;
+    if (on && el && el.isConnected) el.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  /** Scrolling the score by hand while playing detaches the view, so it stops pulling back
+   * to the cursor. Only user gestures count: OSMD's own scrolling fires plain "scroll". */
+  function setupAutoDetach() {
+    const stage = $("stage");
+    const detach = () => { if (state.follow && transport.state === "started") setFollow(false); };
+    stage.addEventListener("wheel", detach, { passive: true });
+    stage.addEventListener("touchmove", detach, { passive: true });
+    stage.addEventListener("pointerdown", (e) => {
+      // Grabbing the scrollbar (the area right of / below the content box).
+      if (e.offsetX > stage.clientWidth || e.offsetY > stage.clientHeight) detach();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown"].includes(e.key) &&
+          !["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) detach();
+    });
   }
 
   function moveCursor(measureIndex, offset) {
@@ -477,6 +517,7 @@
     $("timbre").onchange = changeTimbre;
     $("loop").onchange = applyLoop;
     $("btn-all").onclick = resetMixer;
+    $("btn-follow").onclick = () => setFollow(!state.follow);
     $("btn-library").onclick = () => setLibrary(!$("app").classList.contains("lib-open"));
     document.addEventListener("keydown", (e) => {
       if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) && e.target.type !== "range") return;
@@ -484,6 +525,8 @@
       if (e.code === "Space" && e.target.tagName !== "BUTTON") {
         e.preventDefault();
         togglePlay();
+      } else if (e.code === "KeyF") {
+        setFollow(!state.follow);
       } else if (/^Digit[1-9]$/.test(e.code)) {
         toggleSolo(Number(e.code.slice(5)) - 1);
       }
@@ -495,6 +538,8 @@
   setupControls();
   setLibrary(!NARROW.matches || !location.hash.slice(1));
   updatePlayButton(false);
+  setFollow(state.follow);
+  setupAutoDetach();
   openScore(location.hash.slice(1));
   requestAnimationFrame(tick);
 })();
