@@ -43,6 +43,17 @@
 
   function show(view) {
     for (const v of ["empty", "status", "error", "player"]) $(v).hidden = v !== view;
+    const loaded = view === "player";
+    for (const id of ["mixer", "transport", "score-meta"]) $(id).hidden = !loaded;
+  }
+
+  // ------------------------------------------------------------------ library drawer
+
+  const NARROW = window.matchMedia("(max-width: 1100px)");
+
+  function setLibrary(open) {
+    $("app").classList.toggle("lib-open", open);
+    $("btn-library").setAttribute("aria-expanded", String(open));
   }
 
   function showError(msg) {
@@ -68,7 +79,10 @@
       li.innerHTML = `<span class="name"></span><span class="badge ${s.status === "error" ? "error" : ""}">${badge}</span>`;
       li.querySelector(".name").textContent = s.title || s.filename;
       li.title = s.filename;
-      li.onclick = () => { location.hash = s.id; };
+      li.onclick = () => {
+        location.hash = s.id;
+        if (NARROW.matches) setLibrary(false);
+      };
       if (s.status === "done" || s.status === "error") {
         const del = document.createElement("button");
         del.className = "del";
@@ -167,7 +181,7 @@
     $("score-title").textContent = a.title;
     const staves = a.staves.map((s) => s.voices).join(" + ");
     $("score-info").textContent =
-      `${a.voices.length} vozes (${staves} por pauta) · ${a.measures} compassos · ${a.time_signature} · ${keyName(a.key_fifths)}`;
+      `${a.voices.length} vozes (${staves} por pauta), ${a.measures} compassos, ${a.time_signature}, ${keyName(a.key_fifths)}`;
     $("link-source").href = `/api/scores/${meta.id}/source`;
     $("link-xml").href = `/api/scores/${meta.id}/musicxml`;
     $("tempo").value = Math.round(a.tempo);
@@ -179,7 +193,7 @@
 
   function keyName(fifths) {
     const major = ["Dó♭", "Sol♭", "Ré♭", "Lá♭", "Mi♭", "Si♭", "Fá", "Dó", "Sol", "Ré", "Lá", "Mi", "Si", "Fá♯", "Dó♯"];
-    return `armadura de ${major[fifths + 7] || "?"} maior`;
+    return `${major[fifths + 7] || "?"} maior`;
   }
 
   // ------------------------------------------------------------------ score rendering + cursor
@@ -321,7 +335,9 @@
   }
 
   function updatePlayButton() {
-    $("btn-play").textContent = transport.state === "started" ? "❚❚ Pausar" : "▶ Tocar";
+    const playing = transport.state === "started";
+    $("btn-play").textContent = playing ? "❚❚" : "▶";
+    $("btn-play").setAttribute("aria-label", playing ? "Pausar" : "Tocar");
   }
 
   // ------------------------------------------------------------------ mixer
@@ -332,37 +348,38 @@
     $("voices-title").textContent = `Vozes (${a.voices.length})`;
     a.voices.forEach((v, i) => {
       const el = document.createElement("div");
-      el.className = "voice";
+      el.className = "track";
       el.style.setProperty("--c", COLORS[i % COLORS.length]);
       el.innerHTML = `
-        <div class="row"><span class="vname"></span><span class="range"></span></div>
-        <div class="row">
-          <button class="solo" title="Tocar só esta voz (pode combinar várias)">Solo</button>
-          <button class="mute" title="Silenciar esta voz">Mudo</button>
-          <span class="range now">—</span>
-        </div>
-        <div class="row"><input type="range" min="-30" max="6" step="1" value="0" title="Volume"></div>`;
-      el.querySelector(".vname").textContent = v.name;
+        <div class="name"><span class="led"></span><strong></strong><span class="range"></span></div>
+        <span class="now">—</span>
+        <button class="m" aria-pressed="false">M</button>
+        <button class="s" aria-pressed="false">S</button>
+        <input type="range" min="-30" max="6" step="1" value="0">`;
+      el.querySelector("strong").textContent = v.name;
       el.querySelector(".range").textContent = `${v.low}–${v.high}`;
-      el.querySelector(".solo").onclick = () => { state.voices[i].solo = !state.voices[i].solo; applyMixer(); };
-      el.querySelector(".mute").onclick = () => { state.voices[i].mute = !state.voices[i].mute; applyMixer(); };
+      el.querySelector(".m").title = `Silenciar ${v.name}`;
+      el.querySelector(".s").title = `Tocar só ${v.name} (combine várias com S)${i < 9 ? ` · tecla ${i + 1}` : ""}`;
+      el.querySelector("input").title = `Volume de ${v.name}`;
+      el.querySelector("input").setAttribute("aria-label", `Volume de ${v.name}`);
+      el.querySelector(".s").onclick = () => toggleSolo(i);
+      el.querySelector(".m").onclick = () => { state.voices[i].mute = !state.voices[i].mute; applyMixer(); };
       el.querySelector("input").oninput = (e) => { state.voices[i].volume = Number(e.target.value); applyMixer(); };
       state.voices[i].el = el;
       box.appendChild(el);
     });
+    applyMixer();
+  }
 
-    const quick = $("quick");
-    quick.innerHTML = "";
-    const all = document.createElement("button");
-    all.textContent = "Todas";
-    all.onclick = () => { state.voices.forEach((v) => { v.solo = false; v.mute = false; }); applyMixer(); };
-    quick.appendChild(all);
-    a.voices.forEach((v, i) => {
-      const b = document.createElement("button");
-      b.textContent = `Só ${v.name}`;
-      b.onclick = () => { state.voices.forEach((x, j) => { x.solo = j === i; x.mute = false; }); applyMixer(); };
-      quick.appendChild(b);
-    });
+  function toggleSolo(i) {
+    const v = state.voices[i];
+    if (!v) return;
+    v.solo = !v.solo;
+    applyMixer();
+  }
+
+  function resetMixer() {
+    state.voices.forEach((v) => { v.solo = false; v.mute = false; });
     applyMixer();
   }
 
@@ -373,8 +390,11 @@
       v.channel.mute = v.mute;
       v.channel.volume.value = v.volume <= -30 ? -Infinity : v.volume;
       if (!v.el) continue;
-      v.el.querySelector(".solo").classList.toggle("on", v.solo);
-      v.el.querySelector(".mute").classList.toggle("on", v.mute);
+      for (const [cls, on] of [[".s", v.solo], [".m", v.mute]]) {
+        const b = v.el.querySelector(cls);
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-pressed", String(on));
+      }
       v.el.classList.toggle("silent", v.mute || (anySolo && !v.solo));
     }
   }
@@ -384,6 +404,11 @@
     if (!v || !v.el) return;
     v.el.querySelector(".now").textContent =
       midi == null ? "—" : `${NOTE_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
+    if (midi == null) return;
+    const led = v.el.querySelector(".led");
+    led.classList.remove("hit");
+    void led.offsetWidth; // restart the animation
+    led.classList.add("hit");
   }
 
   // ------------------------------------------------------------------ position / animation
@@ -444,10 +469,16 @@
     };
     $("timbre").onchange = changeTimbre;
     $("loop").onchange = applyLoop;
+    $("btn-all").onclick = resetMixer;
+    $("btn-library").onclick = () => setLibrary(!$("app").classList.contains("lib-open"));
     document.addEventListener("keydown", (e) => {
-      if (e.code === "Space" && !["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(e.target.tagName)) {
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) && e.target.type !== "range") return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.code === "Space" && e.target.tagName !== "BUTTON") {
         e.preventDefault();
         togglePlay();
+      } else if (/^Digit[1-9]$/.test(e.code)) {
+        toggleSolo(Number(e.code.slice(5)) - 1);
       }
     });
     window.addEventListener("hashchange", () => openScore(location.hash.slice(1)));
@@ -455,6 +486,7 @@
 
   setupDropzone();
   setupControls();
+  setLibrary(!NARROW.matches || !location.hash.slice(1));
   openScore(location.hash.slice(1));
   requestAnimationFrame(tick);
 })();
