@@ -44,6 +44,10 @@ Pipeline: upload → (OMR if PDF/image) → MusicXML → `analyze()` → JSON pl
 - Click-to-seek on the score: `measureBox()`/`hitTest()` map pointer coordinates to OSMD geometry (`GraphicSheet.MeasureList[measure][staff].PositionAndShape`, units × `10 * osmd.zoom` px; first measure of a system extends left over the clef). Paused → the click moves the position; playing → it only proposes the jump (`#jump-pop`, 3 s, Enter/Esc) so a stray click can't interrupt; Alt+click snaps to the nearest `staffEntries` column instead of the measure start. With repeats, `timeOf()` picks the occurrence closest to the current position. `leitor.measureRect(i)` exposes measure rectangles for browser tests.
 - `frontend/app.js` — vanilla JS, no build step. Tone.js: one `PolySynth` → `Tone.Channel` → `Tone.Part` per voice (solo/mute use `Channel.solo`/`mute`); times scheduled in ticks so tempo changes apply live. OpenSheetMusicDisplay renders `score.xml`; the cursor is synced by mapping (original measure index, offset in measure) to precomputed cursor steps, which keeps it correct across repeats.
 
+## Claude Code setup
+
+- `.claude/settings.json` is shared project config (committed): it enables the `frontend-design` plugin; use its skill for UI/visual work. Personal settings go in `.claude/settings.local.json` (git-ignored).
+
 ## Gotchas
 
 - Audiveris 5.11 is installed by `dpkg-deb -x` (its postinst fails headless) and needs `libgtk-3` even in batch mode.
