@@ -218,7 +218,7 @@
     try {
       const [analysis, xml] = await Promise.all([
         api(`/api/scores/${id}/analysis`),
-        fetch(`/api/scores/${id}/musicxml`).then((r) => r.text()),
+        fetch(`/api/scores/${id}/musicxml`, { cache: "no-cache" }).then((r) => r.text()),
       ]);
       if (token !== state.loadToken) return;
       state.analysis = analysis;

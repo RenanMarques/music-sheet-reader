@@ -82,3 +82,8 @@ def test_lyric_edit_and_restore(client):
     r = client.post(f"/api/scores/{sid}/lyrics/restore")
     assert r.json()["lyrics_edited"] is False
     assert "Ola<" in client.get(f"/api/scores/{sid}/musicxml").text
+
+
+def test_responses_ask_browsers_to_revalidate(client):
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert client.get("/api/scores").headers["cache-control"] == "no-cache"

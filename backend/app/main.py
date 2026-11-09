@@ -136,6 +136,15 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Leitor de Partituras", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def revalidate_by_default(request, call_next):
+    """Without Cache-Control, browsers cache heuristically and may keep serving an old app.js or
+    an old score.xml (e.g. after lyrics are normalised/edited). Make them revalidate (ETag) instead."""
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 @app.post("/api/scores", status_code=202)
 async def upload(file: UploadFile) -> dict:
     filename = Path(file.filename or "partitura").name
