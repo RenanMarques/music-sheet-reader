@@ -266,8 +266,26 @@ button.edit-toggle[aria-pressed="true"] { background: var(--accent); color: var(
 .key-control button.step { display: grid; place-items: center; width: 28px; padding: 0; font-size: 1rem; line-height: 1; }
 .key-control button.step:first-child { border-radius: 6px 0 0 6px; }
 .key-control button.step:last-child { border-radius: 0 6px 6px 0; }
-.key-control select { border-radius: 0; border-left: none; border-right: none; max-width: 11em; }
-.key-control.transposed select { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* The closed select shows a custom label on top ("F" + small "original"); its own text is hidden.
+ * Opening it still shows the native list. Width follows the label (set in renderKeyControl). */
+.key-select { position: relative; display: flex; }
+.key-control select { border-radius: 0; border-left: none; border-right: none; color: transparent; appearance: none; -webkit-appearance: none; cursor: pointer; }
+/* Our own arrow: the native one takes the (transparent) text colour in Chrome. */
+.key-select::after {
+  content: ""; position: absolute; right: 9px; top: 50%; width: 6px; height: 6px; margin-top: -5px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg);
+  color: var(--console-muted); pointer-events: none;
+}
+.key-control.transposed .key-select::after { color: var(--accent); }
+.key-control select option { color: var(--console-ink); background: var(--console-raised); font-weight: 400; }
+.key-label {
+  position: absolute; top: 0; bottom: 0; left: 0; display: flex; align-items: center; gap: 4px;
+  padding-left: 9px; pointer-events: none; white-space: nowrap; color: var(--console-ink);
+}
+.key-label small { font-size: .72em; color: var(--console-muted); }
+.key-control.transposed select { background: var(--accent-soft); }
+.key-control.transposed .key-label { color: var(--accent); font-weight: 600; }
+.key-control.transposed .key-label small { color: inherit; font-weight: 500; }
 .console button.follow { font-size: .85rem; padding: 5px 12px; border-radius: 999px; }
 .console button.follow.on { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent); font-weight: 600; }
 

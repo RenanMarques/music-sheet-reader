@@ -95,7 +95,10 @@
       <div class="settings">
         <div class="key-control" id="key-control" role="group" aria-label="Tom">
           <button id="btn-key-down" class="step" title="Baixar meio-tom (−)" aria-label="Baixar meio-tom">−</button>
-          <select id="key-select" aria-label="Tonalidade" title="Tonalidade"></select>
+          <div class="key-select">
+            <select id="key-select" aria-label="Tonalidade" title="Tonalidade"></select>
+            <span class="key-label" id="key-label" aria-hidden="true"></span>
+          </div>
           <button id="btn-key-up" class="step" title="Subir meio-tom (+)" aria-label="Subir meio-tom">+</button>
         </div>
         <label title="Andamento">♩ <input type="range" id="tempo" min="30" max="220" step="1" aria-label="Andamento"> <span id="tempo-value" class="readout"></span></label>

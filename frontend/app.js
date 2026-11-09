@@ -330,6 +330,17 @@
       select.appendChild(opt);
     }
     select.title = t ? `Tonalidade: ${signed(t)} semitons em relação à original` : "Tonalidade original";
+    // Compact label for the closed select: key name + small "original" or offset.
+    const label = $("key-label");
+    label.innerHTML = "";
+    const name = document.createElement("span");
+    name.textContent = keyName(transposeFifths(a.key_fifths, t)).replace(" maior", "");
+    const small = document.createElement("small");
+    small.textContent = t ? signed(t) : "original";
+    label.append(name, small);
+    // Size the select to the label (+ room for the arrow), not to its longest option.
+    select.style.width = "";
+    requestAnimationFrame(() => { select.style.width = `${Math.ceil(label.scrollWidth) + 26}px`; });
     $("key-control").classList.toggle("transposed", t !== 0);
     $("btn-key-down").disabled = t <= -TRANSPOSE_LIMIT;
     $("btn-key-up").disabled = t >= TRANSPOSE_LIMIT;
