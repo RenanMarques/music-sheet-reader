@@ -260,11 +260,13 @@ button.edit-toggle[aria-pressed="true"] { background: var(--accent); color: var(
 .settings label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .settings input[type=range] { width: 110px; }
 .toggle { font-size: .85rem; cursor: pointer; }
-.key-control { display: flex; align-items: center; }
-.key-control button.step { width: 28px; height: 30px; padding: 0; font-size: 1rem; line-height: 1; }
+/* No fixed heights: the select keeps the same natural height (and text centring) as the timbre
+ * select, and the −/+ buttons stretch to match it. */
+.key-control { display: flex; align-items: stretch; }
+.key-control button.step { display: grid; place-items: center; width: 28px; padding: 0; font-size: 1rem; line-height: 1; }
 .key-control button.step:first-child { border-radius: 6px 0 0 6px; }
 .key-control button.step:last-child { border-radius: 0 6px 6px 0; }
-.key-control select { border-radius: 0; border-left: none; border-right: none; height: 30px; max-width: 11em; }
+.key-control select { border-radius: 0; border-left: none; border-right: none; max-width: 11em; }
 .key-control.transposed select { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .console button.follow { font-size: .85rem; padding: 5px 12px; border-radius: 999px; }
 .console button.follow.on { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent); font-weight: 600; }
