@@ -22,10 +22,12 @@
   const NOTATIONS = {
     letters: {
       notes: ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"],
+      sharpNotes: ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"],
       majorKeys: ["C♭", "G♭", "D♭", "A♭", "E♭", "B♭", "F", "C", "G", "D", "A", "E", "B", "F♯", "C♯"],
     },
     solfege: {
       notes: ["Dó", "Dó♯", "Ré", "Mi♭", "Mi", "Fá", "Fá♯", "Sol", "Lá♭", "Lá", "Si♭", "Si"],
+      sharpNotes: ["Dó", "Dó♯", "Ré", "Ré♯", "Mi", "Fá", "Fá♯", "Sol", "Sol♯", "Lá", "Lá♯", "Si"],
       majorKeys: ["Dó♭", "Sol♭", "Ré♭", "Lá♭", "Mi♭", "Si♭", "Fá", "Dó", "Sol", "Ré", "Lá", "Mi", "Si", "Fá♯", "Dó♯"],
     },
   };
@@ -56,12 +58,27 @@
     if (key === "noteNames") refreshNoteNames();
   }
 
+  /** Note name for the UI. In sharp keys (as drawn, i.e. after transposition) black keys are
+   * spelled with sharps, matching the score; otherwise the mixed default (C♯ E♭ F♯ A♭ B♭). */
   function noteName(midi) {
-    return `${NOTATIONS[settings.noteNames].notes[midi % 12]}${Math.floor(midi / 12) - 1}`;
+    const n = NOTATIONS[settings.noteNames];
+    const a = state.analysis;
+    const sharpKey = a && transposeFifths(a.key_fifths, state.transpose) > 0;
+    return `${(sharpKey ? n.sharpNotes : n.notes)[midi % 12]}${Math.floor(midi / 12) - 1}`;
   }
 
   function keyName(fifths) {
     return `${NOTATIONS[settings.noteNames].majorKeys[fifths + 7] || "?"} maior`;
+  }
+
+  // Key signature (fifths) for each tonic pitch class, C=0 … B=11. Same table as OSMD's
+  // TransposeCalculator, so the key we name always matches the key it draws.
+  const KEY_FOR_PITCH_CLASS = [0, -5, 2, -3, 4, -1, 6, 1, -4, 3, -2, 5];
+
+  /** Fifths of a major key transposed by `semitones`. */
+  function transposeFifths(fifths, semitones) {
+    const tonic = (((fifths * 7) % 12) + 12) % 12;
+    return KEY_FOR_PITCH_CLASS[(((tonic + semitones) % 12) + 12) % 12];
   }
 
   window.leitor = { settings, set: setSetting, defaults: DEFAULT_SETTINGS };
@@ -80,6 +97,7 @@
     seeking: false,
     pollTimer: null,
     loadToken: 0,
+    transpose: 0, // semitones applied to playback and to the drawn score (per score, saved locally)
   };
 
   // ------------------------------------------------------------------ API
@@ -223,6 +241,7 @@
       if (token !== state.loadToken) return;
       state.analysis = analysis;
       state.meta = meta;
+      state.transpose = loadTranspose(id);
       setEditing(false);
       renderHeader(meta, analysis);
       setupAudio(analysis);
@@ -238,6 +257,7 @@
   function renderHeader(meta, a) {
     $("score-title").textContent = a.title;
     renderScoreInfo(a);
+    renderKeyControl();
     $("link-source").href = `/api/scores/${meta.id}/source`;
     $("link-xml").href = `/api/scores/${meta.id}/musicxml`;
     transport.bpm.value = a.tempo; // before updatePosition(): the total time depends on it
@@ -251,14 +271,18 @@
 
   function renderScoreInfo(a) {
     const staves = a.staves.map((s) => s.voices).join(" + ");
+    const key = state.transpose
+      ? `${keyName(transposeFifths(a.key_fifths, state.transpose))} (original: ${keyName(a.key_fifths)})`
+      : keyName(a.key_fifths);
     $("score-info").textContent =
-      `${a.voices.length} vozes (${staves} por pauta), ${a.measures} compassos, ${a.time_signature}, ${keyName(a.key_fifths)}`;
+      `${a.voices.length} vozes (${staves} por pauta), ${a.measures} compassos, ${a.time_signature}, ${key}`;
   }
 
-  /** Re-labels everything that shows note names (after the notation setting changes). */
+  /** Re-labels everything that shows note or key names (notation setting or transposition changed). */
   function refreshNoteNames() {
     if (!state.analysis) return;
     renderScoreInfo(state.analysis);
+    renderKeyControl();
     state.analysis.voices.forEach((v, i) => {
       const el = state.voices[i] && state.voices[i].el;
       if (!el) return;
@@ -272,7 +296,96 @@
     if (!v.notes.length) return "";
     let lo = Infinity, hi = -Infinity;
     for (const n of v.notes) { lo = Math.min(lo, n.midi); hi = Math.max(hi, n.midi); }
-    return `${noteName(lo)}–${noteName(hi)}`;
+    return `${noteName(lo + state.transpose)}–${noteName(hi + state.transpose)}`;
+  }
+
+  // ------------------------------------------------------------------ transposition
+
+  const TRANSPOSE_LIMIT = 12; // semitones, each way
+  const SELECT_RANGE = 6; // the key list offers −6…+6
+
+  function loadTranspose(id) {
+    try { return Math.max(-TRANSPOSE_LIMIT, Math.min(TRANSPOSE_LIMIT, Number(localStorage.getItem(`transpose:${id}`)) || 0)); }
+    catch (_) { return 0; }
+  }
+
+  function signed(n) { return n > 0 ? `+${n}` : n < 0 ? `−${-n}` : "0"; }
+
+  function renderKeyControl() {
+    const a = state.analysis;
+    if (!a) return;
+    const select = $("key-select");
+    const t = state.transpose;
+    const offsets = [];
+    for (let o = SELECT_RANGE; o >= -SELECT_RANGE; o--) offsets.push(o);
+    if (!offsets.includes(t)) offsets.unshift(t);
+    offsets.sort((x, y) => y - x);
+    select.innerHTML = "";
+    for (const o of offsets) {
+      const opt = document.createElement("option");
+      opt.value = String(o);
+      const name = keyName(transposeFifths(a.key_fifths, o)).replace(" maior", "");
+      opt.textContent = o === 0 ? `${name} (original)` : `${name} ${signed(o)}`;
+      opt.selected = o === t;
+      select.appendChild(opt);
+    }
+    select.title = t ? `Tonalidade: ${signed(t)} semitons em relação à original` : "Tonalidade original";
+    // Compact label for the closed select: key name + small "original" or offset.
+    const label = $("key-label");
+    label.innerHTML = "";
+    const name = document.createElement("span");
+    name.textContent = keyName(transposeFifths(a.key_fifths, t)).replace(" maior", "");
+    const small = document.createElement("small");
+    small.textContent = t ? signed(t) : "original";
+    label.append(name, small);
+    // Size the select to the label (+ room for the arrow), not to its longest option.
+    select.style.width = "";
+    requestAnimationFrame(() => { select.style.width = `${Math.ceil(label.scrollWidth) + 26}px`; });
+    $("key-control").classList.toggle("transposed", t !== 0);
+    $("btn-key-down").disabled = t <= -TRANSPOSE_LIMIT;
+    $("btn-key-up").disabled = t >= TRANSPOSE_LIMIT;
+  }
+
+  let transposeRenderTimer = 0;
+
+  /** Changes the transposition: audio immediately, the drawn score shortly after (debounced,
+   * so several quick clicks only re-render once). */
+  function setTranspose(semitones) {
+    if (!state.analysis) return;
+    const t = Math.max(-TRANSPOSE_LIMIT, Math.min(TRANSPOSE_LIMIT, semitones));
+    if (t === state.transpose) return;
+    const delta = t - state.transpose;
+    state.transpose = t;
+    // The "current note" labels hold sounding (transposed) pitches: shift them too.
+    for (const v of state.voices) {
+      const now = v.el && v.el.querySelector(".now");
+      if (now && now.dataset.midi) now.dataset.midi = String(Number(now.dataset.midi) + delta);
+    }
+    try {
+      if (t) localStorage.setItem(`transpose:${state.id}`, String(t));
+      else localStorage.removeItem(`transpose:${state.id}`);
+    } catch (_) { /* storage blocked */ }
+    refreshNoteNames();
+    if (transport.state === "started") {
+      // Re-sound what is playing now at the new pitch.
+      releaseAll();
+      chase(transport.ticks / PPQ, Tone.now() + 0.02);
+    }
+    clearTimeout(transposeRenderTimer);
+    transposeRenderTimer = setTimeout(rerenderTransposed, 120);
+  }
+
+  function rerenderTransposed() {
+    const osmd = state.osmd;
+    if (!osmd || !osmd.Sheet) return;
+    const stage = $("stage");
+    const top = stage.scrollTop;
+    osmd.Sheet.Transpose = state.transpose;
+    osmd.updateGraphic();
+    osmd.render();
+    buildCursorSteps();
+    updatePosition(transport.ticks / PPQ, { scroll: false });
+    stage.scrollTop = top;
   }
 
   // ------------------------------------------------------------------ score rendering + cursor
@@ -292,7 +405,9 @@
       followCursor: true,
     });
     state.osmd.FollowCursor = settings.follow;
+    state.osmd.TransposeCalculator = new opensheetmusicdisplay.TransposeCalculator();
     await state.osmd.load(xml);
+    state.osmd.Sheet.Transpose = state.transpose;
     state.osmd.render();
     buildCursorSteps();
   }
@@ -387,8 +502,9 @@
       const voice = { channel, synth: makeSynth(timbre).connect(channel), mute: false, solo: false, volume: 0, el: null };
       voice.part = new Tone.Part((time, n) => {
         const dur = Math.max(0.05, Tone.Ticks(n.dt).toSeconds() * 0.94);
-        voice.synth.triggerAttackRelease(Tone.Frequency(n.midi, "midi").toFrequency(), dur, time);
-        Tone.getDraw().schedule(() => showNote(i, n.midi), time);
+        const midi = n.midi + state.transpose;
+        voice.synth.triggerAttackRelease(Tone.Frequency(midi, "midi").toFrequency(), dur, time);
+        Tone.getDraw().schedule(() => showNote(i, midi), time);
       }, v.notes.map((n) => ({ time: `${Math.round(n.t * PPQ)}i`, dt: Math.round(n.d * PPQ), midi: n.midi })));
       voice.part.start(0);
       state.voices.push(voice);
@@ -591,8 +707,9 @@
         const left = n.t + n.d - q;
         if (left <= 0.05) continue;
         const secs = Tone.Ticks(Math.round(left * PPQ)).toSeconds() * 0.94;
-        voice.synth.triggerAttackRelease(Tone.Frequency(n.midi, "midi").toFrequency(), Math.max(0.05, secs), when);
-        Tone.getDraw().schedule(() => showNote(i, n.midi), when);
+        const midi = n.midi + state.transpose;
+        voice.synth.triggerAttackRelease(Tone.Frequency(midi, "midi").toFrequency(), Math.max(0.05, secs), when);
+        Tone.getDraw().schedule(() => showNote(i, midi), when);
       }
     });
   }
@@ -880,6 +997,7 @@
     const top = stage.scrollTop;
     const xml = await fetch(`/api/scores/${state.id}/musicxml`, { cache: "no-store" }).then((r) => r.text());
     await state.osmd.load(xml);
+    state.osmd.Sheet.Transpose = state.transpose;
     state.osmd.render();
     buildCursorSteps();
     updatePosition(transport.ticks / PPQ, { scroll: false });
@@ -1079,6 +1197,9 @@
     $("loop").onchange = applyLoop;
     $("btn-all").onclick = resetMixer;
     $("btn-follow").onclick = () => setFollow(!settings.follow);
+    $("btn-key-down").onclick = () => setTranspose(state.transpose - 1);
+    $("btn-key-up").onclick = () => setTranspose(state.transpose + 1);
+    $("key-select").onchange = (e) => { setTranspose(Number(e.target.value)); e.target.blur(); };
     $("btn-library").onclick = () => setLibrary(!$("app").classList.contains("lib-open"));
     document.addEventListener("keydown", (e) => {
       if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) && e.target.type !== "range") return;
@@ -1091,6 +1212,10 @@
       } else if (e.code === "Space" && e.target.tagName !== "BUTTON") {
         e.preventDefault();
         togglePlay();
+      } else if (e.key === "+" || e.key === "=" || e.code === "NumpadAdd") {
+        setTranspose(state.transpose + 1);
+      } else if (e.key === "-" || e.code === "NumpadSubtract") {
+        setTranspose(state.transpose - 1);
       } else if (e.code === "KeyF") {
         setFollow(!settings.follow);
       } else if (/^Digit[1-9]$/.test(e.code)) {

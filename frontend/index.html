@@ -76,7 +76,7 @@
         <button id="btn-all" class="chip" title="Tirar todos os solos e mudos">Todas</button>
       </div>
       <div id="voices" class="tracks"></div>
-      <p class="hint">S toca só as vozes marcadas; M silencia. Teclas 1–9 alternam o solo de cada voz; F liga ou desliga o acompanhamento da partitura. Clique num compasso para ir até ele; Alt+clique vai para a nota exata.</p>
+      <p class="hint">S toca só as vozes marcadas; M silencia. Teclas 1–9 alternam o solo de cada voz; + e − mudam o tom em meio-tom; F liga ou desliga o acompanhamento da partitura. Clique num compasso para ir até ele; Alt+clique vai para a nota exata.</p>
     </aside>
 
     <footer class="transport console" id="transport" hidden>
@@ -93,6 +93,14 @@
         <span id="position" class="readout">Compasso 1</span>
       </div>
       <div class="settings">
+        <div class="key-control" id="key-control" role="group" aria-label="Tom">
+          <button id="btn-key-down" class="step" title="Baixar meio-tom (−)" aria-label="Baixar meio-tom">−</button>
+          <div class="key-select">
+            <select id="key-select" aria-label="Tonalidade" title="Tonalidade"></select>
+            <span class="key-label" id="key-label" aria-hidden="true"></span>
+          </div>
+          <button id="btn-key-up" class="step" title="Subir meio-tom (+)" aria-label="Subir meio-tom">+</button>
+        </div>
         <label title="Andamento">♩ <input type="range" id="tempo" min="30" max="220" step="1" aria-label="Andamento"> <span id="tempo-value" class="readout"></span></label>
         <select id="timbre" aria-label="Timbre" title="Timbre">
           <option value="triangle">Suave</option>
