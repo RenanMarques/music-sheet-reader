@@ -4,7 +4,8 @@ Uploads are stored under DATA_DIR/scores/<id>/:
   meta.json      job status (queued | processing | done | error)
   source.<ext>   the uploaded file
   omr/           Audiveris output (only for PDF/images)
-  score.xml      plain MusicXML (recognised or uploaded)
+  score.orig.xml MusicXML before any lyric edits (for OMR: lyrics already normalised)
+  score.xml      MusicXML shown and downloaded (score.orig.xml + lyric edits)
   analysis.json  playback model from app.musicxml.analyze
 """
 
@@ -25,6 +26,9 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from pydantic import BaseModel
+
+from .lyrics import LyricsError, apply_lyric_edits, normalize_lyrics
 from .musicxml import MusicXMLError, analyze, read_musicxml_bytes
 from .omr import OMRError, run_audiveris
 
@@ -41,6 +45,7 @@ XML_EXTS = {".xml", ".musicxml", ".mxl"}
 # Audiveris is memory hungry: process one score at a time.
 executor = ThreadPoolExecutor(max_workers=1)
 _lock = threading.Lock()
+_edit_lock = threading.Lock()
 
 
 def _dir(score_id: str) -> Path:
@@ -78,7 +83,8 @@ def process(d: Path) -> None:
         else:
             _write_meta(d, status="processing", stage="Lendo MusicXML…")
             xml = read_musicxml_bytes(source.read_bytes())
-        (d / "score.xml").write_bytes(xml)
+        is_omr = source.suffix.lower() in OMR_EXTS
+        _store_score(d, xml, normalize=is_omr)
         _write_meta(d, stage="Separando vozes…")
         result = analyze(xml, title_fallback=title)
         if not result["voices"]:
@@ -95,10 +101,27 @@ def process(d: Path) -> None:
         _write_meta(d, status="error", stage=None, error=f"Erro inesperado: {e}")
 
 
+def _store_score(d: Path, xml: bytes, normalize: bool) -> None:
+    """Write score.orig.xml/score.xml. OMR output gets its lyrics normalised (see app.lyrics);
+    uploaded MusicXML is kept as is, since its voices/lyrics were written on purpose."""
+    if normalize:
+        xml, _stats = normalize_lyrics(xml)
+    (d / "score.orig.xml").write_bytes(xml)
+    (d / "score.xml").write_bytes(xml)
+    _write_meta(d, lyrics_edited=False)
+
+
 def resume_pending() -> None:
     SCORES_DIR.mkdir(parents=True, exist_ok=True)
     for meta_file in SCORES_DIR.glob("*/meta.json"):
         meta = json.loads(meta_file.read_text())
+        d = meta_file.parent
+        # Scores processed before lyric normalisation existed.
+        if meta.get("status") == "done" and not (d / "score.orig.xml").exists() and (d / "score.xml").exists():
+            try:
+                _store_score(d, (d / "score.xml").read_bytes(), normalize=Path(meta["source"]).suffix.lower() in OMR_EXTS)
+            except LyricsError:
+                traceback.print_exc()
         if meta.get("status") in ("queued", "processing"):
             _write_meta(meta_file.parent, status="queued", stage="Na fila…")
             executor.submit(process, meta_file.parent)
@@ -111,6 +134,15 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Leitor de Partituras", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def revalidate_by_default(request, call_next):
+    """Without Cache-Control, browsers cache heuristically and may keep serving an old app.js or
+    an old score.xml (e.g. after lyrics are normalised/edited). Make them revalidate (ETag) instead."""
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", "no-cache")
+    return response
 
 
 @app.post("/api/scores", status_code=202)
@@ -170,7 +202,52 @@ def get_musicxml(score_id: str) -> FileResponse:
     if not f.exists():
         raise HTTPException(409, "Partitura ainda não processada")
     name = Path(_read_meta(d)["filename"]).stem + ".musicxml"
-    return FileResponse(f, media_type="application/vnd.recordare.musicxml+xml", filename=name)
+    return FileResponse(
+        f,
+        media_type="application/vnd.recordare.musicxml+xml",
+        filename=name,
+        headers={"Cache-Control": "no-cache"},  # changes when lyrics are edited
+    )
+
+
+class LyricEdit(BaseModel):
+    part: str
+    staff: str = "1"
+    measure: int
+    offset: float  # quarters from the start of the measure
+    verse: str = "1"
+    text: str  # trailing "-" = word continues; "" removes the syllable
+
+
+class LyricEdits(BaseModel):
+    edits: list[LyricEdit]
+
+
+def _require_done(d: Path) -> None:
+    if _read_meta(d).get("status") != "done":
+        raise HTTPException(409, "Partitura ainda não processada")
+
+
+@app.put("/api/scores/{score_id}/lyrics")
+def edit_lyrics(score_id: str, body: LyricEdits) -> dict:
+    d = _dir(score_id)
+    _require_done(d)
+    with _edit_lock:
+        try:
+            xml = apply_lyric_edits((d / "score.xml").read_bytes(), [e.model_dump() for e in body.edits])
+        except LyricsError as e:
+            raise HTTPException(400, str(e)) from e
+        (d / "score.xml").write_bytes(xml)
+    return _write_meta(d, lyrics_edited=True)
+
+
+@app.post("/api/scores/{score_id}/lyrics/restore")
+def restore_lyrics(score_id: str) -> dict:
+    d = _dir(score_id)
+    _require_done(d)
+    with _edit_lock:
+        shutil.copyfile(d / "score.orig.xml", d / "score.xml")
+    return _write_meta(d, lyrics_edited=False)
 
 
 @app.get("/api/scores/{score_id}/source")
