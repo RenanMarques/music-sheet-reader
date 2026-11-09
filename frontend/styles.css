@@ -141,6 +141,32 @@ button.ghost:hover { background: var(--bg); }
 .jump-pop .time-left { display: block; height: 2px; margin-top: 5px; border-radius: 1px; background: rgba(255,255,255,.55); transform-origin: left; animation: drain var(--ttl, 3s) linear forwards; }
 @keyframes drain { to { transform: scaleX(0); } }
 
+/* Lyric editing mode */
+button.edit-toggle { color: var(--accent); font-size: .85rem; border-color: var(--line); }
+button.edit-toggle[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.edit-bar {
+  position: sticky; top: -16px; z-index: 6; max-width: 1100px; margin: -16px auto 12px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; background: var(--accent-soft); border: 1px solid #d9c8ff; border-radius: 0 0 var(--radius) var(--radius);
+  font-size: .85rem;
+}
+.edit-bar p { flex: 1; min-width: 260px; line-height: 1.5; }
+.edit-bar kbd { font: inherit; font-size: .8rem; padding: 0 5px; border: 1px solid #c7b3f5; border-radius: 4px; background: var(--paper); }
+.edit-status { color: var(--muted); }
+.edit-status.error { color: var(--danger); }
+.edit-bar button.done { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.edit-bar button.restore.confirm { background: var(--danger); color: #fff; border-color: var(--danger); }
+.app.editing .sheet { cursor: text; }
+.app.editing .measure-hover { background: rgba(124, 58, 237, .1); box-shadow: inset 0 0 0 1px rgba(124, 58, 237, .45); }
+.lyric-input {
+  position: absolute; z-index: 7; transform: translateX(-50%);
+  font-family: "Times New Roman", Times, serif; text-align: center;
+  padding: 0 6px; min-width: 3.5em; border: 2px solid var(--accent); border-radius: 4px;
+  background: var(--paper); color: var(--ink); box-shadow: 0 4px 14px -4px rgba(76, 29, 149, .4);
+}
+.lyric-input:focus { outline: none; }
+.lyric-input[disabled] { opacity: .6; }
+
 /* ------------------------------------------------------------------ console (mixer + transport) */
 
 .console { background: var(--console); color: var(--console-ink); }

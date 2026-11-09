@@ -68,3 +68,17 @@ def test_omr_upload_uses_filename_as_title(client, monkeypatch, tmp_path):
     sid = client.post("/api/scores", files={"file": ("Meu Hino.pdf", b"%PDF-1.5")}).json()["id"]
     meta = wait_done(client, sid)
     assert meta["status"] == "done" and meta["title"] == "Meu Hino"
+
+
+def test_lyric_edit_and_restore(client):
+    xml = score(m(1, n("C", 4, 4))).replace(b"</note>", b'<lyric number="1"><syllabic>single</syllabic><text>Ola</text></lyric></note>', 1)
+    sid = client.post("/api/scores", files={"file": ("h.musicxml", xml)}).json()["id"]
+    wait_done(client, sid)
+    r = client.put(f"/api/scores/{sid}/lyrics", json={"edits": [{"part": "P1", "measure": 0, "offset": 0, "text": "Olá"}]})
+    assert r.status_code == 200 and r.json()["lyrics_edited"] is True
+    assert "Olá" in client.get(f"/api/scores/{sid}/musicxml").text
+    bad = client.put(f"/api/scores/{sid}/lyrics", json={"edits": [{"part": "P1", "measure": 9, "offset": 0, "text": "x"}]})
+    assert bad.status_code == 400
+    r = client.post(f"/api/scores/{sid}/lyrics/restore")
+    assert r.json()["lyrics_edited"] is False
+    assert "Ola<" in client.get(f"/api/scores/{sid}/musicxml").text

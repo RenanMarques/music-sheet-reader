@@ -188,6 +188,7 @@
   async function openScore(id) {
     const token = ++state.loadToken;
     clearTimeout(state.pollTimer);
+    if (state.editing) setEditing(false);
     stop();
     disposeAudio();
     state.id = id || null;
@@ -221,6 +222,8 @@
       ]);
       if (token !== state.loadToken) return;
       state.analysis = analysis;
+      state.meta = meta;
+      setEditing(false);
       renderHeader(meta, analysis);
       setupAudio(analysis);
       renderVoices(analysis);
@@ -237,6 +240,7 @@
     renderScoreInfo(a);
     $("link-source").href = `/api/scores/${meta.id}/source`;
     $("link-xml").href = `/api/scores/${meta.id}/musicxml`;
+    transport.bpm.value = a.tempo; // before updatePosition(): the total time depends on it
     $("tempo").value = Math.round(a.tempo);
     $("tempo-value").textContent = Math.round(a.tempo);
     $("seek").max = a.duration;
@@ -696,6 +700,249 @@
     el.hidden = false;
   }
 
+  // ------------------------------------------------------------------ lyric editing
+
+  /** Editable positions ("slots") of every lyric line, from OSMD's graphical model.
+   * A line is (part, staff, verse); it has one slot per sounding note onset of that staff,
+   * with or without a syllable, so Tab can also reach notes whose syllable the OCR missed.
+   * Slot boxes are in OSMD units; the backend addresses notes by the same
+   * (part, staff, measure index, offset in quarters) key. */
+  function lyricLines() {
+    const osmd = state.osmd;
+    if (!osmd || !osmd.GraphicSheet) return new Map();
+    const lines = new Map();
+    const rowY = new Map(); // `${system}|${part}|${staff}|${verse}` -> label top (units)
+    const entries = [];
+    osmd.GraphicSheet.MeasureList.forEach((staves, mi) => {
+      staves.forEach((gm) => {
+        if (!gm) return;
+        const staffObj = gm.ParentStaff;
+        const part = staffObj.ParentInstrument.IdString;
+        const staff = String(staffObj.ParentInstrument.Staves.indexOf(staffObj) + 1);
+        const system = gm.ParentMusicSystem ? gm.ParentMusicSystem.Id : 0;
+        for (const se of gm.staffEntries || []) {
+          const sounding = se.sourceStaffEntry.VoiceEntries.some((ve) => ve.Notes.some((n) => !n.isRest()));
+          const lyrics = {};
+          for (const gle of se.LyricsEntries || []) {
+            const le = gle.LyricsEntry;
+            const ps = gle.GraphicalLabel.PositionAndShape;
+            const box = {
+              x: ps.AbsolutePosition.x + ps.BorderLeft, y: ps.AbsolutePosition.y + ps.BorderTop,
+              w: ps.BorderRight - ps.BorderLeft, h: ps.BorderBottom - ps.BorderTop,
+            };
+            const syl = le.Word ? le.Word.Syllables : [le];
+            lyrics[le.VerseNumber] = { text: le.Text, continues: syl.indexOf(le) < syl.length - 1, box };
+            rowY.set(`${system}|${part}|${staff}|${le.VerseNumber}`, box);
+          }
+          const sp = se.PositionAndShape;
+          entries.push({
+            part, staff, system, measure: mi, offset: se.relInMeasureTimestamp.RealValue * 4,
+            x: sp.AbsolutePosition.x + (sp.BorderLeft + sp.BorderRight) / 2, sounding, lyrics,
+            staffBottom: gm.PositionAndShape.AbsolutePosition.y + 4,
+          });
+        }
+      });
+    });
+    // Verses per staff, then one ordered slot list per line.
+    const verses = new Map();
+    for (const e of entries) for (const v of Object.keys(e.lyrics)) {
+      const k = `${e.part}|${e.staff}`;
+      if (!verses.has(k)) verses.set(k, new Set());
+      verses.get(k).add(v);
+    }
+    for (const e of entries) {
+      for (const verse of verses.get(`${e.part}|${e.staff}`) || []) {
+        if (!e.sounding && !e.lyrics[verse]) continue;
+        const key = `${e.part}|${e.staff}|${verse}`;
+        if (!lines.has(key)) lines.set(key, []);
+        const ly = e.lyrics[verse];
+        const row = rowY.get(`${e.system}|${e.part}|${e.staff}|${verse}`);
+        lines.get(key).push({
+          key, part: e.part, staff: e.staff, verse, measure: e.measure, offset: e.offset,
+          text: ly ? ly.text : "", continues: ly ? ly.continues : false,
+          box: ly ? ly.box : { x: e.x - 1.5, y: row ? row.y : e.staffBottom + 2 + 2.6 * (Number(verse) - 1), w: 3, h: row ? row.h : 2 },
+        });
+      }
+    }
+    for (const slots of lines.values()) slots.sort((a, b) => a.measure - b.measure || a.offset - b.offset);
+    return lines;
+  }
+
+  function slotBox(slot) {
+    const pad = 0.4;
+    return { x: slot.box.x - pad, y: slot.box.y - pad, w: slot.box.w + 2 * pad, h: slot.box.h + 2 * pad };
+  }
+
+  /** The slot under the pointer: a syllable's own box, or an empty note position in a lyric row. */
+  function lyricSlotAt(clientX, clientY) {
+    const svg = state.osmd && $("osmd").querySelector("svg");
+    if (!svg) return null;
+    const r = svg.getBoundingClientRect(), unit = 10 * state.osmd.zoom;
+    const ux = (clientX - r.left) / unit, uy = (clientY - r.top) / unit;
+    let best = null, bestD = Infinity;
+    for (const slots of lyricLines().values()) {
+      for (const s of slots) {
+        const b = slotBox(s);
+        if (uy < b.y || uy > b.y + b.h) continue;
+        const inside = ux >= b.x && ux <= b.x + b.w;
+        const d = inside ? 0 : Math.min(Math.abs(ux - b.x), Math.abs(ux - b.x - b.w));
+        if (d < bestD && d < 2) { bestD = d; best = s; }
+      }
+    }
+    return best;
+  }
+
+  /** Positions an overlay over a box given in OSMD units. */
+  function placeBox(el, box) {
+    const svg = $("osmd").querySelector("svg");
+    const sheet = $("sheet").getBoundingClientRect();
+    const r = svg.getBoundingClientRect(), unit = 10 * state.osmd.zoom;
+    el.style.left = `${r.left - sheet.left + box.x * unit}px`;
+    el.style.top = `${r.top - sheet.top + box.y * unit}px`;
+    el.style.width = `${box.w * unit}px`;
+    el.style.height = `${box.h * unit}px`;
+    el.hidden = false;
+  }
+
+  const lyricEdit = { slot: null, saving: false };
+
+  function openLyricEditor(slot) {
+    const input = $("lyric-input");
+    const svg = $("osmd").querySelector("svg");
+    const sheet = $("sheet").getBoundingClientRect();
+    const r = svg.getBoundingClientRect(), unit = 10 * state.osmd.zoom;
+    lyricEdit.slot = slot;
+    input.value = slot.text + (slot.continues ? "-" : "");
+    input.style.left = `${r.left - sheet.left + (slot.box.x + slot.box.w / 2) * unit}px`;
+    input.style.top = `${r.top - sheet.top + (slot.box.y - 0.35) * unit}px`;
+    input.style.height = `${(slot.box.h + 0.7) * unit}px`;
+    input.style.fontSize = `${slot.box.h * unit * 0.9}px`;
+    input.style.width = `${Math.max(3.5, input.value.length + 2)}ch`;
+    input.disabled = false;
+    input.hidden = false;
+    $("measure-hover").hidden = true;
+    input.focus();
+    input.select();
+  }
+
+  function closeLyricEditor() {
+    lyricEdit.slot = null;
+    $("lyric-input").hidden = true;
+  }
+
+  function editStatus(text, error = false) {
+    const el = $("edit-status");
+    el.textContent = text;
+    el.classList.toggle("error", error);
+  }
+
+  /** Saves the open syllable (if changed); then optionally opens the next/previous slot. */
+  async function commitLyric(step = 0) {
+    const slot = lyricEdit.slot;
+    if (!slot || lyricEdit.saving) return;
+    const input = $("lyric-input");
+    const value = input.value.trim();
+    const changed = value !== (slot.text + (slot.continues ? "-" : ""));
+    const go = () => {
+      if (!step) { closeLyricEditor(); return; }
+      const slots = lyricLines().get(slot.key) || [];
+      const i = slots.findIndex((s) => s.measure === slot.measure && Math.abs(s.offset - slot.offset) < 1e-6);
+      const next = slots[i + step];
+      if (next) openLyricEditor(next); else closeLyricEditor();
+    };
+    if (!changed) { go(); return; }
+    lyricEdit.saving = true;
+    input.disabled = true;
+    editStatus("Salvando…");
+    try {
+      const meta = await api(`/api/scores/${state.id}/lyrics`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ edits: [{ part: slot.part, staff: slot.staff, measure: slot.measure, offset: slot.offset, verse: slot.verse, text: value }] }),
+      });
+      state.meta = meta;
+      await reloadScoreXml();
+      editStatus("Salvo");
+      updateRestoreButton();
+      lyricEdit.saving = false;
+      go();
+    } catch (e) {
+      lyricEdit.saving = false;
+      input.disabled = false;
+      input.focus();
+      editStatus(`Não foi possível salvar: ${e.message}`, true);
+    }
+  }
+
+  /** Re-renders the score after a lyric change, keeping the scroll and playback cursor. */
+  async function reloadScoreXml() {
+    const stage = $("stage");
+    const top = stage.scrollTop;
+    const xml = await fetch(`/api/scores/${state.id}/musicxml`, { cache: "no-store" }).then((r) => r.text());
+    await state.osmd.load(xml);
+    state.osmd.render();
+    buildCursorSteps();
+    updatePosition(transport.ticks / PPQ, { scroll: false });
+    stage.scrollTop = top;
+  }
+
+  function updateRestoreButton() {
+    const btn = $("btn-restore-lyrics");
+    btn.hidden = !(state.meta && state.meta.lyrics_edited);
+    btn.classList.remove("confirm");
+    btn.textContent = "Restaurar letra original";
+  }
+
+  function setEditing(on) {
+    state.editing = on;
+    $("app").classList.toggle("editing", on);
+    $("edit-bar").hidden = !on;
+    $("btn-edit-lyrics").setAttribute("aria-pressed", String(on));
+    $("measure-hover").hidden = true;
+    hidePick();
+    closeLyricEditor();
+    editStatus("");
+    updateRestoreButton();
+  }
+
+  function setupLyricEditing() {
+    $("btn-edit-lyrics").onclick = () => setEditing(!state.editing);
+    $("btn-done-lyrics").onclick = () => setEditing(false);
+    const input = $("lyric-input");
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation(); // keep play/solo shortcuts out of the text field
+      if (e.key === "Enter") { e.preventDefault(); commitLyric(0); }
+      else if (e.key === "Tab") { e.preventDefault(); commitLyric(e.shiftKey ? -1 : 1); }
+      else if (e.key === "Escape") { e.preventDefault(); closeLyricEditor(); }
+    });
+    input.addEventListener("input", () => { input.style.width = `${Math.max(3.5, input.value.length + 2)}ch`; });
+    input.addEventListener("blur", () => {
+      // Clicking elsewhere saves, like most inline editors (unless a save is already running).
+      setTimeout(() => { if (lyricEdit.slot && document.activeElement !== input) commitLyric(0); }, 0);
+    });
+    let confirmTimer = 0;
+    $("btn-restore-lyrics").onclick = async () => {
+      const btn = $("btn-restore-lyrics");
+      if (!btn.classList.contains("confirm")) {
+        btn.classList.add("confirm");
+        btn.textContent = "Desfazer todas as correções?";
+        clearTimeout(confirmTimer);
+        confirmTimer = setTimeout(updateRestoreButton, 4000);
+        return;
+      }
+      clearTimeout(confirmTimer);
+      closeLyricEditor();
+      try {
+        state.meta = await api(`/api/scores/${state.id}/lyrics/restore`, { method: "POST" });
+        await reloadScoreXml();
+        editStatus("Letra original restaurada");
+      } catch (e) {
+        editStatus(`Não foi possível restaurar: ${e.message}`, true);
+      }
+      updateRestoreButton();
+    };
+  }
+
   /** Screen rectangle of measure i (used by browser tests). */
   function measureRect(i) {
     const svg = state.osmd && $("osmd").querySelector("svg");
@@ -705,6 +952,7 @@
     return { left: r.left + box.x * unit, top: r.top + box.y * unit, width: box.w * unit, height: box.h * unit };
   }
   window.leitor.measureRect = measureRect;
+  window.leitor.lyricSlotAt = (x, y) => { const s = lyricSlotAt(x, y); return s && { ...s, box: { ...s.box } }; };
 
   function hidePick() {
     clearTimeout(pick.timer);
@@ -727,9 +975,14 @@
     let raf = 0;
 
     sheet.addEventListener("pointermove", (e) => {
-      if (!HOVER.matches || e.target.closest(".jump-pop")) return;
+      if (!HOVER.matches || e.target.closest(".jump-pop, .lyric-input")) return;
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
+        if (state.editing) {
+          const slot = lyricSlotAt(e.clientX, e.clientY);
+          if (slot) placeBox(hover, slotBox(slot)); else hover.hidden = true;
+          return;
+        }
         const hit = hitTest(e.clientX, e.clientY, false);
         sheet.classList.toggle("can-pick", Boolean(hit));
         if (hit) placeOver(hover, hit); else hover.hidden = true;
@@ -739,12 +992,17 @@
 
     sheet.addEventListener("pointerdown", (e) => { pick.down = { x: e.clientX, y: e.clientY }; });
     sheet.addEventListener("click", (e) => {
-      if (e.target.closest(".jump-pop")) return;
+      if (e.target.closest(".jump-pop, .lyric-input")) return;
       const d = pick.down;
       pick.down = null;
       // Ignore drags, text selections and non-primary buttons.
       if (e.button !== 0 || !d || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) return;
       if (String(window.getSelection() || "").trim()) return;
+      if (state.editing) {
+        const slot = lyricSlotAt(e.clientX, e.clientY);
+        if (slot) openLyricEditor(slot);
+        return;
+      }
       const hit = hitTest(e.clientX, e.clientY, e.altKey);
       if (!hit) { hidePick(); return; }
       const target = timeOf(hit.measure, hit.offset);
@@ -849,6 +1107,7 @@
   setFollow(settings.follow);
   setupAutoDetach();
   setupScorePicking();
+  setupLyricEditing();
   openScore(location.hash.slice(1));
   requestAnimationFrame(tick);
 })();

@@ -16,6 +16,7 @@
         <span id="score-info" class="muted"></span>
         <a id="link-source" target="_blank" rel="noopener">Ver original</a>
         <a id="link-xml">Baixar MusicXML</a>
+        <button id="btn-edit-lyrics" class="ghost edit-toggle" aria-pressed="false" title="Corrigir a letra clicando nas sílabas">Editar letra</button>
       </div>
     </header>
 
@@ -46,6 +47,15 @@
       <div id="error" class="message error" hidden></div>
 
       <div id="player" hidden>
+        <div class="edit-bar" id="edit-bar" hidden>
+          <p>
+            <strong>Editando a letra.</strong> Clique numa sílaba para corrigi-la. Termine com <kbd>-</kbd> se a palavra continua.
+            <kbd>Tab</kbd> vai para a próxima nota, <kbd>Enter</kbd> salva, <kbd>Esc</kbd> cancela.
+          </p>
+          <span class="edit-status" id="edit-status" role="status"></span>
+          <button id="btn-restore-lyrics" class="restore" hidden>Restaurar letra original</button>
+          <button id="btn-done-lyrics" class="done">Concluir</button>
+        </div>
         <p class="notice">
           O reconhecimento automático pode errar notas ou ritmos. Para corrigir, baixe o MusicXML,
           edite em um editor como o MuseScore e envie o arquivo corrigido.
@@ -55,6 +65,7 @@
           <div class="measure-hover" id="measure-hover" hidden></div>
           <div class="measure-pick" id="measure-pick" hidden></div>
           <button class="jump-pop" id="jump-pop" hidden></button>
+          <input class="lyric-input" id="lyric-input" type="text" hidden autocomplete="off" spellcheck="false" aria-label="Sílaba">
         </div>
       </div>
     </main>
