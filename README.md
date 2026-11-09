@@ -18,8 +18,11 @@ Abra http://localhost:8000 e envie uma partitura (ex.: `examples/Cantam Anjos Ha
 ## Recursos
 
 - Detecta o número de vozes por pauta e as separa (SATB recebe os nomes Soprano/Contralto/Tenor/Baixo).
-- Solo, mudo e volume por voz; botões “Só Baixo” etc.
-- Andamento ajustável, timbres, repetição, cursor acompanhando a partitura.
+- Solo (S), mudo (M) e volume por voz, sempre visíveis ao lado da partitura; teclas 1–9 alternam o solo.
+- Andamento ajustável, timbres, repetição e cursor acompanhando a partitura (botão "Seguir", tecla F).
+- Mudança de tom: subir/descer meio-tom (botões ou teclas + e −) ou escolher a tonalidade; som e partitura são transpostos.
+- Clique num compasso para ir até ele (Alt+clique: nota exata).
+- Correção da letra direto na partitura ("Editar letra").
 - Download do MusicXML reconhecido. O OMR pode errar notas e ritmos; corrija em um editor (ex.: MuseScore) e reenvie o `.musicxml`.
 
 ## Testes
