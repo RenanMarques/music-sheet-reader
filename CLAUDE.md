@@ -8,10 +8,10 @@ Web tool that reads sheet music (PDF/image via OMR, or MusicXML), splits it into
 
 ## Commands
 
-Everything runs in Docker — the host has no pip/venv/node. `docker compose` passes `UID`/`GID` (defaults to 1000) so files in `./data` belong to the user.
+Everything runs in Docker — the host has no pip/venv/node. `./start.sh` exports `HOST_UID`/`HOST_GID` (compose runs the container as that user, so `./data` stays user-owned; bash's `UID` isn't exported, hence the separate names), creates `./data`, runs compose and waits for `/api/scores`.
 
 ```bash
-docker compose up -d --build          # build + run at http://localhost:8000 (backend changes need --build)
+./start.sh                            # build + run at http://localhost:8000 and wait until it answers (--open, --no-build, PORT=…)
 docker compose logs -f app
 
 # Tests (mount the source so no rebuild is needed for test runs)
