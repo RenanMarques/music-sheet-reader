@@ -20,7 +20,7 @@ from fractions import Fraction
 from math import lcm
 from xml.etree import ElementTree as ET
 
-from .lyrics import _insert_lyric
+from .lyrics import _group, _host, _insert_lyric, _iter_notes
 from .musicxml import _parse_root, separate
 from .voices import find_type
 
@@ -478,11 +478,75 @@ def separate_staves(data: bytes, names: list[str] | None = None, hidden: set[int
     return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
 
 
-def draw(data: bytes, layout: str = "parts", names: list[str] | None = None, hidden: set[int] = frozenset()) -> bytes:
+def _origin(part: str, staff: str) -> tuple[str, str]:
+    """The stored (part, staff) a drawn staff comes from (split parts: `P1__s1v2` -> P1, 1)."""
+    m = re.fullmatch(rf"(.*){SPLIT_MARK}([^v]+)v\d+", part)
+    return (m.group(1), m.group(2)) if m else (part, staff)
+
+
+def _lyric_lines(root: ET.Element) -> tuple[list[tuple], dict[tuple, dict[str, dict]]]:
+    """Staves in score order and, per staff, its lyric lines: {verse: {(measure, onset): <lyric>}}."""
+    order: list[tuple] = []
+    lines: dict[tuple, dict[str, dict]] = {}
+    for n in _iter_notes(root):
+        key = (n.part, n.staff)
+        if key not in lines:
+            order.append(key)
+            lines[key] = {}
+        for ly in n.el.findall("lyric"):
+            lines[key].setdefault(ly.get("number", "1"), {}).setdefault((n.measure, n.onset), ly)
+    return order, lines
+
+
+def keep_lyrics(stored: ET.Element, drawn: ET.Element) -> list[dict]:
+    """Lyrics of staves whose voices are all hidden, moved onto the nearest drawn staff (below,
+    else above) for every verse that staff has no line of its own (a line with under half the
+    syllables is OCR noise and is replaced): any voice left on the page shows the words. Returns where each moved line came from, for lyric edits:
+    [{part, staff, verse} drawn, from_part, from_staff}]."""
+    order, lines = _lyric_lines(stored)
+    drawn_order, drawn_lines = _lyric_lines(drawn)
+    origins = {d: _origin(*d) for d in drawn_order}
+    index = {k: i for i, k in enumerate(order)}
+    groups = _group(drawn)
+    moved = []
+    for lost in order:
+        if not lines[lost] or lost in origins.values():
+            continue
+        below = [d for d in drawn_order if index.get(origins[d], -1) > index[lost]]
+        above = [d for d in drawn_order if -1 < index.get(origins[d], -1) < index[lost]]
+        target = below[0] if below else (above[-1] if above else None)
+        if target is None:
+            continue
+        for verse, syllables in lines[lost].items():
+            own = drawn_lines[target].get(verse)
+            if own and len(own) >= len(syllables) / 2:
+                continue  # the staff has its own words for this verse
+            if own:  # a much shorter line: OCR noise (credits read as lyrics), replaced
+                for n in _iter_notes(drawn):
+                    if (n.part, n.staff) == target:
+                        for ly in n.el.findall("lyric"):
+                            if ly.get("number", "1") == verse:
+                                n.el.remove(ly)
+            for (mi, onset), ly in syllables.items():
+                host = _host(groups.get((*target, mi, onset), []))
+                if host is not None:
+                    _insert_lyric(host.el, copy.deepcopy(ly))
+            drawn_lines[target][verse] = syllables
+            moved.append({"part": target[0], "staff": target[1], "verse": verse, "from_part": lost[0], "from_staff": lost[1]})
+    return moved
+
+
+def draw(data: bytes, layout: str = "parts", names: list[str] | None = None, hidden: set[int] = frozenset()) -> tuple[bytes, list[dict]]:
     """The MusicXML to draw: `layout` ("parts" as stored, "combined", "separate") without the
-    `hidden` voices (analysis indexes)."""
-    if layout == "separate":
-        return separate_staves(data, names, hidden)
-    if hidden:
-        data = separate_staves(data, names, hidden, split_all=False)
-    return combine_staves(data) if layout == "combined" else data
+    `hidden` voices (analysis indexes), and where moved lyric lines came from (`keep_lyrics`)."""
+    moved: list[dict] = []
+    if hidden or layout == "separate":
+        out = separate_staves(data, names, hidden, split_all=layout == "separate")
+        if hidden and out is not data:
+            root = _parse_root(out)
+            moved = keep_lyrics(_parse_root(data), root)
+            if moved:
+                ET.indent(root)
+                out = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+        data = out
+    return (combine_staves(data) if layout == "combined" else data), moved

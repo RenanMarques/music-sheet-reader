@@ -100,6 +100,7 @@
     transpose: 0, // semitones applied to playback and to the drawn score (per score, saved locally)
     layout: "parts", // "parts" | "combined" | "separate" staves (per score, saved locally)
     hidden: new Set(), // ids of voices left out of the drawing (per score, saved locally)
+    lyricsFrom: [], // lyric lines the backend moved off hidden staves: [{part, staff, verse, from_part, from_staff}]
   };
 
   // ------------------------------------------------------------------ API
@@ -375,10 +376,11 @@
       const hidden = loadHidden(id, meta.voices);
       const [analysis, xml] = await Promise.all([
         api(`/api/scores/${id}/analysis`),
-        fetch(scoreXmlUrl(id, layout, hidden), { cache: "no-cache" }).then((r) => r.text()),
+        fetchScoreXml(scoreXmlUrl(id, layout, hidden), "no-cache"),
       ]);
       if (token !== state.loadToken) return;
       state.analysis = analysis;
+      state.lyricsFrom = xml.lyricsFrom;
       state.meta = meta;
       state.layout = layout;
       state.hidden = hidden;
@@ -389,7 +391,7 @@
       setupAudio(analysis);
       renderVoices(analysis);
       show("player");
-      await renderScore(xml);
+      await renderScore(xml.text);
     } catch (e) {
       if (token === state.loadToken) showError(`Erro ao carregar: ${e.message}`);
     }
@@ -507,6 +509,16 @@
     if (hidden && hidden.size) q.set("hide", [...hidden].sort().join(","));
     const qs = q.toString();
     return `/api/scores/${id}/musicxml` + (qs ? `?${qs.replace(/%2C/g, ",")}` : "");
+  }
+
+  /** The MusicXML to draw, and the lyric lines the backend moved off hidden staves
+   *  (X-Lyrics-From): a lyric edit on them goes to the staff they came from. */
+  async function fetchScoreXml(url, cache) {
+    const r = await fetch(url, { cache });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    let lyricsFrom = [];
+    try { lyricsFrom = JSON.parse(r.headers.get("X-Lyrics-From") || "[]"); } catch (_) { /* ignore */ }
+    return { text: await r.text(), lyricsFrom };
   }
 
   // ------------------------------------------------------------------ hidden voices
@@ -1220,6 +1232,7 @@
         const staffObj = gm.ParentStaff;
         let part = staffObj.ParentInstrument.IdString;
         let staff = String(staffObj.ParentInstrument.Staves.indexOf(staffObj) + 1);
+        const drawn = { part, staff }; // for lyric lines moved here from a hidden staff
         // Separated staves (separate layout, or a staff with hidden voices): a lyric edit
         // addresses the original (part, staff); its syllables are drawn on the top drawn voice's
         // staff (app/layout.py), so only that one offers slots.
@@ -1248,7 +1261,7 @@
           }
           const sp = se.PositionAndShape;
           entries.push({
-            part, staff, system, measure: mi, offset: se.relInMeasureTimestamp.RealValue * 4,
+            part, staff, drawn, system, measure: mi, offset: se.relInMeasureTimestamp.RealValue * 4,
             x: sp.AbsolutePosition.x + (sp.BorderLeft + sp.BorderRight) / 2, sounding, lyrics,
             staffBottom: gm.PositionAndShape.AbsolutePosition.y + 4,
           });
@@ -1269,8 +1282,9 @@
         if (!lines.has(key)) lines.set(key, []);
         const ly = e.lyrics[verse];
         const row = rowY.get(`${e.system}|${e.part}|${e.staff}|${verse}`);
+        const moved = state.lyricsFrom.find((x) => x.part === e.drawn.part && x.staff === e.drawn.staff && x.verse === verse);
         lines.get(key).push({
-          key, part: e.part, staff: e.staff, verse, measure: e.measure, offset: e.offset,
+          key, part: moved ? moved.from_part : e.part, staff: moved ? moved.from_staff : e.staff, verse, measure: e.measure, offset: e.offset,
           text: ly ? ly.text : "", continues: ly ? ly.continues : false,
           box: ly ? ly.box : { x: e.x - 1.5, y: row ? row.y : e.staffBottom + 2 + 2.6 * (Number(verse) - 1), w: 3, h: row ? row.h : 2 },
         });
@@ -1393,9 +1407,10 @@
     const stage = $("stage");
     const top = stage.scrollTop;
     const seq = ++reloadSeq;
-    const xml = await fetch(scoreXmlUrl(state.id, state.layout, state.hidden), { cache: "no-store" }).then((r) => r.text());
+    const { text, lyricsFrom } = await fetchScoreXml(scoreXmlUrl(state.id, state.layout, state.hidden), "no-store");
     if (seq !== reloadSeq) return; // a newer reload (e.g. another voice hidden meanwhile) wins
-    await state.osmd.load(xml);
+    state.lyricsFrom = lyricsFrom;
+    await state.osmd.load(text);
     state.osmd.Sheet.Transpose = state.transpose;
     state.osmd.render();
     buildCursorSteps();

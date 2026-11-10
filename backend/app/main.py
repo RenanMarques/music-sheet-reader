@@ -355,7 +355,10 @@ def get_musicxml(score_id: str, layout: str = "parts", hide: str = "") -> Respon
                 analysis = _apply_voice_layout(json.loads((d / "analysis.json").read_text()), _read_meta(d).get("voice_layout"))
                 by_id = {v["id"]: v["name"] for v in analysis["voices"]}
                 names = [by_id.get(f"v{i + 1}") for i in range(len(by_id))]
-        return Response(draw(data, layout, names, hidden), media_type="application/vnd.recordare.musicxml+xml")
+        xml, moved = draw(data, layout, names, hidden)
+        # Lyric lines moved off hidden staves: where a lyric edit made on them must go.
+        headers = {"X-Lyrics-From": json.dumps(moved)} if moved else {}
+        return Response(xml, media_type="application/vnd.recordare.musicxml+xml", headers=headers)
     meta = _read_meta(d)
     name = (meta.get("title") or Path(meta["filename"]).stem) + ".musicxml"
     return FileResponse(
