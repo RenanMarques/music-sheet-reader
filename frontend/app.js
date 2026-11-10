@@ -1214,6 +1214,8 @@
    * with or without a syllable, so Tab can also reach notes whose syllable the OCR missed.
    * Slot boxes are in OSMD units; the backend addresses notes by the same
    * (part, staff, measure index, offset in quarters) key. */
+  const CARRIER_VOICE = 5; // MusicXML voice of the invisible notes carrying a lyric line (app/layout.py)
+
   function lyricLines() {
     const osmd = state.osmd;
     if (!osmd || !osmd.GraphicSheet) return new Map();
@@ -1226,6 +1228,15 @@
       const k = sp && `${sp.part}|${sp.staff}`;
       if (sp && !(topSplit.get(k) <= sp.voice)) topSplit.set(k, sp.voice);
     }
+    // Staves whose words are on an invisible voice of their own (app/layout.py, CARRIER_VOICE):
+    // that voice has exactly the onsets of the staff the words come from, so only its notes are
+    // lyric slots there.
+    const carrierStaves = new Set();
+    osmd.GraphicSheet.MeasureList.forEach((staves) => staves.forEach((gm) => {
+      if (gm && (gm.staffEntries || []).some((se) => se.sourceStaffEntry.VoiceEntries.some((ve) => ve.ParentVoice.VoiceId >= CARRIER_VOICE))) {
+        carrierStaves.add(gm.ParentStaff);
+      }
+    }));
     osmd.GraphicSheet.MeasureList.forEach((staves, mi) => {
       staves.forEach((gm) => {
         if (!gm) return;
@@ -1242,11 +1253,13 @@
           ({ part, staff } = split);
         }
         const system = gm.ParentMusicSystem ? gm.ParentMusicSystem.Id : 0;
+        const carrier = carrierStaves.has(staffObj);
         for (const se of gm.staffEntries || []) {
           // On a combined staff only the top voice (voice 1) carries lyrics: its notes are the
           // ones a lyric edit addresses in the stored score (same part id, see app/layout.py).
+          const lyricVoice = (id) => (carrier ? id >= CARRIER_VOICE : state.layout !== "combined" || id === 1);
           const sounding = se.sourceStaffEntry.VoiceEntries.some((ve) =>
-            (state.layout !== "combined" || ve.ParentVoice.VoiceId === 1) && ve.Notes.some((n) => !n.isRest()));
+            lyricVoice(ve.ParentVoice.VoiceId) && ve.Notes.some((n) => !n.isRest()));
           const lyrics = {};
           for (const gle of se.LyricsEntries || []) {
             const le = gle.LyricsEntry;
