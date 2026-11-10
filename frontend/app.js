@@ -98,7 +98,7 @@
     pollTimer: null,
     loadToken: 0,
     transpose: 0, // semitones applied to playback and to the drawn score (per score, saved locally)
-    layout: "parts", // "parts" | "combined" staves (per score, saved locally)
+    layout: "parts", // "parts" | "combined" | "separate" staves (per score, saved locally)
   };
 
   // ------------------------------------------------------------------ API
@@ -370,7 +370,7 @@
     $("status-title").textContent = meta.filename;
     $("status-text").textContent = "Carregando…";
     try {
-      const layout = meta.combinable ? loadLayout(id) : "parts";
+      const layout = loadLayout(id, meta);
       const [analysis, xml] = await Promise.all([
         api(`/api/scores/${id}/analysis`),
         fetch(scoreXmlUrl(id, layout), { cache: "no-cache" }).then((r) => r.text()),
@@ -485,29 +485,43 @@
   const SELECT_RANGE = 6; // the key list offers −6…+6
 
   // ------------------------------------------------------------------ staff layout
-  // "parts": one staff per voice part, as stored. "combined": same-clef neighbouring voices
-  // (S+C, T+B) share a staff, drawn by the backend (app/layout.py). Drawing only: playback,
-  // the mixer and the stored MusicXML don't change. Saved per score.
+  // "parts": the staves as stored. "combined": same-clef neighbouring voices (S+C, T+B) share a
+  // staff. "separate": each voice of a shared staff gets its own staff (the voices of the mixer).
+  // Both drawn by the backend (app/layout.py). Drawing only: playback, the mixer and the stored
+  // MusicXML don't change. Saved per score.
 
-  function loadLayout(id) {
-    try { return localStorage.getItem(`layout:${id}`) === "combined" ? "combined" : "parts"; } catch (_) { return "parts"; }
+  const LAYOUTS = { combined: "combinable", separate: "separable" }; // layout -> meta flag
+
+  function loadLayout(id, meta) {
+    let saved = null;
+    try { saved = localStorage.getItem(`layout:${id}`); } catch (_) { /* private mode */ }
+    return LAYOUTS[saved] && meta[LAYOUTS[saved]] ? saved : "parts";
   }
 
   function scoreXmlUrl(id, layout) {
-    return `/api/scores/${id}/musicxml` + (layout === "combined" ? "?layout=combined" : "");
+    return `/api/scores/${id}/musicxml` + (LAYOUTS[layout] ? `?layout=${layout}` : "");
+  }
+
+  /** A part of the separated layout is one voice of an original (part, staff): `P1__s1v2`. */
+  function sourcePart(part) {
+    const m = /^(.*)__s([^v]+)v(\d+)$/.exec(part);
+    return m ? { part: m[1], staff: m[2], voice: Number(m[3]) } : null;
   }
 
   function renderLayoutButton() {
-    const btn = $("btn-layout");
-    btn.hidden = !(state.meta && state.meta.combinable);
-    const combined = state.layout === "combined";
-    btn.setAttribute("aria-pressed", String(combined));
-    btn.textContent = combined ? "Pautas juntas" : "Juntar pautas";
+    const buttons = { combined: ["btn-layout", "Pautas juntas", "Juntar pautas"], separate: ["btn-separate", "Pautas separadas", "Separar pautas"] };
+    for (const [layout, [id, on, off]] of Object.entries(buttons)) {
+      const btn = $(id);
+      btn.hidden = !(state.meta && state.meta[LAYOUTS[layout]]);
+      const active = state.layout === layout;
+      btn.setAttribute("aria-pressed", String(active));
+      btn.textContent = active ? on : off;
+    }
   }
 
-  async function toggleLayout() {
+  async function toggleLayout(layout) {
     if (!state.osmd || !state.id) return;
-    state.layout = state.layout === "combined" ? "parts" : "combined";
+    state.layout = state.layout === layout ? "parts" : layout;
     try { localStorage.setItem(`layout:${state.id}`, state.layout); } catch (_) { /* private mode */ }
     renderLayoutButton();
     closeLyricEditor();
@@ -916,6 +930,7 @@
     state.analysis.voices = edited.map((e) => ({ ...e.info, name: e.name }));
     state.voices = edited.map((e) => e.voice);
     renderVoices(state.analysis);
+    if (state.layout === "separate") await reloadScoreXml(); // the separated staves carry the voice names
   }
 
   function toggleSolo(i) {
@@ -1141,8 +1156,15 @@
       staves.forEach((gm) => {
         if (!gm) return;
         const staffObj = gm.ParentStaff;
-        const part = staffObj.ParentInstrument.IdString;
-        const staff = String(staffObj.ParentInstrument.Staves.indexOf(staffObj) + 1);
+        let part = staffObj.ParentInstrument.IdString;
+        let staff = String(staffObj.ParentInstrument.Staves.indexOf(staffObj) + 1);
+        // Separated staves: a lyric edit addresses the original (part, staff); its syllables are
+        // drawn on the top voice's staff (app/layout.py), so only that one offers slots.
+        const split = state.layout === "separate" ? sourcePart(part) : null;
+        if (split) {
+          if (split.voice !== 1) return;
+          ({ part, staff } = split);
+        }
         const system = gm.ParentMusicSystem ? gm.ParentMusicSystem.Id : 0;
         for (const se of gm.staffEntries || []) {
           // On a combined staff only the top voice (voice 1) carries lyrics: its notes are the
@@ -1335,7 +1357,8 @@
 
   function setupLyricEditing() {
     $("btn-edit-lyrics").onclick = () => setEditing(!state.editing);
-    $("btn-layout").onclick = toggleLayout;
+    $("btn-layout").onclick = () => toggleLayout("combined");
+    $("btn-separate").onclick = () => toggleLayout("separate");
     $("btn-done-lyrics").onclick = () => setEditing(false);
     const input = $("lyric-input");
     input.addEventListener("keydown", (e) => {

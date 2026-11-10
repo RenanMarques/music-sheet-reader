@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .lyrics import LyricsError, apply_lyric_edits, normalize_lyrics
-from .layout import can_combine, combine_staves
+from .layout import can_combine, can_separate, combine_staves, separate_staves
 from .merge import PartFile, merge_scores
 from .sheettext import common_title, credit_lines, pdf_lines
 from .voices import voice_from_lines
@@ -141,7 +141,13 @@ def process(d: Path) -> None:
             result["title"] = title
         (d / "analysis.json").write_text(json.dumps(result, ensure_ascii=False))
         _write_meta(
-            d, status="done", stage=None, title=result["title"], voices=len(result["voices"]), combinable=can_combine(xml)
+            d,
+            status="done",
+            stage=None,
+            title=result["title"],
+            voices=len(result["voices"]),
+            combinable=can_combine(xml),
+            separable=can_separate(xml),
         )
     except (OMRError, MusicXMLError) as e:
         _write_meta(d, status="error", stage=None, error=str(e))
@@ -171,10 +177,11 @@ def resume_pending() -> None:
                 _store_score(d, (d / "score.xml").read_bytes(), normalize=Path(meta["source"]).suffix.lower() in OMR_EXTS)
             except LyricsError:
                 traceback.print_exc()
-        # Scores processed before the combined-staves layout existed.
-        if meta.get("status") == "done" and "combinable" not in meta and (d / "score.xml").exists():
+        # Scores processed before the combined/separate staff layouts existed.
+        if meta.get("status") == "done" and ("combinable" not in meta or "separable" not in meta) and (d / "score.xml").exists():
             try:
-                _write_meta(d, combinable=can_combine((d / "score.xml").read_bytes()))
+                xml = (d / "score.xml").read_bytes()
+                _write_meta(d, combinable=can_combine(xml), separable=can_separate(xml))
             except MusicXMLError:
                 traceback.print_exc()
         if meta.get("status") in ("queued", "processing"):
@@ -330,8 +337,9 @@ def set_voice_layout(score_id: str, body: VoiceLayout) -> dict:
 
 @app.get("/api/scores/{score_id}/musicxml")
 def get_musicxml(score_id: str, layout: str = "parts") -> Response:
-    """The score as stored (one part per voice), or with `layout=combined` the drawing layout with
-    same-clef voices sharing a staff (see app.layout)."""
+    """The score as stored, or a drawing layout (see app.layout): `layout=combined`, same-clef
+    voices sharing a staff; `layout=separate`, each voice of a shared staff on its own staff,
+    named as in the mixer."""
     d = _dir(score_id)
     f = d / "score.xml"
     if not f.exists():
@@ -340,6 +348,15 @@ def get_musicxml(score_id: str, layout: str = "parts") -> Response:
         with _edit_lock:
             data = f.read_bytes()
         return Response(combine_staves(data), media_type="application/vnd.recordare.musicxml+xml")
+    if layout == "separate":
+        with _edit_lock:
+            data = f.read_bytes()
+        names = None
+        if (d / "analysis.json").exists():
+            analysis = _apply_voice_layout(json.loads((d / "analysis.json").read_text()), _read_meta(d).get("voice_layout"))
+            by_id = {v["id"]: v["name"] for v in analysis["voices"]}
+            names = [by_id.get(f"v{i + 1}") for i in range(len(by_id))]
+        return Response(separate_staves(data, names), media_type="application/vnd.recordare.musicxml+xml")
     meta = _read_meta(d)
     name = (meta.get("title") or Path(meta["filename"]).stem) + ".musicxml"
     return FileResponse(

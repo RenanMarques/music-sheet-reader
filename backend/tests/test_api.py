@@ -159,3 +159,14 @@ def test_parts_upload_rejects_a_bad_file(client):
     files = [("files", ("[S] h.musicxml", b"<x/>")), ("files", ("[C] h.docx", b"x"))]
     r = client.post("/api/scores", files=files)
     assert r.status_code == 400 and "[C] h.docx" in r.json()["detail"]
+
+
+def test_separate_staves_layout(client):
+    treble = m(1, n("E", 5, 2) + n("C", 5, 2, chord=True) + n("D", 5, 2) + n("B", 4, 2, chord=True))
+    sid = client.post("/api/scores", files={"file": ("h.musicxml", score(treble))}).json()["id"]
+    meta = wait_done(client, sid)
+    assert meta["separable"] and not meta["combinable"]
+    r = client.get(f"/api/scores/{sid}/musicxml?layout=separate")
+    assert r.status_code == 200 and b'<part id="P1__s1v2">' in r.content
+    client.put(f"/api/scores/{sid}/voices", json={"voices": [{"id": "v1", "name": ""}, {"id": "v2", "name": "Alto"}]})
+    assert b"<part-name>Alto</part-name>" in client.get(f"/api/scores/{sid}/musicxml?layout=separate").content
