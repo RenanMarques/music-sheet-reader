@@ -332,3 +332,79 @@ button.edit-toggle[aria-pressed="true"] { background: var(--accent); color: var(
   .jump-pop .time-left { animation: none; }
   .spinner { animation-duration: 3s; }
 }
+
+/* ------------------------------------------------------------------ scores combined from parts */
+.score-meta .source-parts { display: inline-flex; gap: 6px; align-items: baseline; color: var(--muted); }
+.merge-notes summary { cursor: pointer; width: fit-content; }
+.merge-notes ul { margin: 6px 0 0; padding-left: 20px; }
+
+/* ------------------------------------------------------------------ new score (compose) */
+button.dropzone { width: 100%; font: inherit; color: inherit; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button.primary:hover { background: #6d28d9; border-color: #6d28d9; }
+button.primary:disabled { background: var(--line); border-color: var(--line); color: var(--muted); cursor: not-allowed; }
+
+.compose {
+  max-width: 720px; margin: 32px auto; padding: 28px 32px 24px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.compose h2 { font-size: 1.35rem; font-weight: 650; letter-spacing: -.01em; }
+.compose-lead { margin-top: 6px; color: var(--muted); line-height: 1.5; max-width: 62ch; }
+.compose-drop {
+  display: flex; flex-direction: column; gap: 2px; margin-top: 20px; padding: 16px;
+  border: 2px dashed #d6d0c4; border-radius: var(--radius); cursor: pointer; text-align: center;
+}
+.compose-drop span { color: var(--muted); font-size: .85rem; }
+.compose-drop:hover, .compose-drop.over { border-color: var(--accent); background: #faf7ff; }
+
+.compose-list { list-style: none; margin: 16px 0 0; padding: 0; }
+.compose-list:empty { display: none; }
+.compose-file {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px;
+  padding: 10px 0; border-top: 1px solid var(--line);
+}
+.compose-file:last-child { border-bottom: 1px solid var(--line); }
+.compose-file .file { min-width: 0; }
+.compose-file .file strong { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.compose-file .file small { color: var(--muted); font-size: .78rem; }
+.compose-file .voice { display: flex; gap: 6px; align-items: center; }
+.compose-file select, .compose-file input, .compose-title input {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper);
+}
+.compose-file select { min-width: 10.5em; }
+/* "Automático" reads as a default; a chosen voice reads as a decision. */
+.compose-file select.auto { color: var(--muted); }
+.compose-file select:not(.auto) { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.compose-file input.other { width: 9em; }
+.compose-file .remove { border: none; background: none; color: var(--muted); padding: 4px 6px; font-size: 1rem; }
+.compose-file .remove:hover { color: var(--danger); }
+
+.compose-note { margin-top: 12px; font-size: .85rem; color: var(--muted); line-height: 1.5; }
+.compose-note:empty { display: none; }
+.compose-title { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+.compose-title span { font-weight: 500; }
+.compose-title input { flex: 1; min-width: 0; }
+.compose-error { margin-top: 12px; color: var(--danger); font-size: .9rem; }
+.compose-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+
+@media (max-width: 640px) {
+  .compose { margin: 12px 0; padding: 20px 16px; border-left: none; border-right: none; border-radius: 0; }
+  .compose-file { grid-template-columns: minmax(0, 1fr) auto; }
+  .compose-file .voice { grid-column: 1 / -1; grid-row: 2; }
+  .compose-file .voice select { flex: 1; }
+}
+
+/* ------------------------------------------------------------------ voice editing (mixer) */
+.mixer-actions { display: flex; gap: 6px; }
+.console button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.track.edit { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: none; align-items: center; gap: 6px; }
+.track.edit input.vname {
+  min-width: 0; width: 100%; padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--console-line); background: var(--console); color: var(--console-ink);
+  box-shadow: inset 3px 0 0 var(--c);
+}
+.track.edit input.vname:focus { border-color: var(--console-muted); outline: none; }
+.track.edit .auto { grid-column: 1 / -1; font-size: .75rem; color: var(--console-muted); }
+.track.edit button { padding: 3px 8px; }
+.track.edit button:disabled { opacity: .35; cursor: default; }
+#empty .primary { margin-top: 16px; padding: 8px 18px; }

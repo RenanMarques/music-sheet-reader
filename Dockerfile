@@ -20,6 +20,9 @@ RUN apt-get update \
     done \
  && rm -f /tmp/audiveris.deb && rm -rf /var/lib/apt/lists/*
 
+# pdftotext: the printed text of digital PDFs (title, "SOPRANO", ...) is read to identify voices.
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -r /app/backend/requirements.txt

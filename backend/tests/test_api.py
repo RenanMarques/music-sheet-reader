@@ -87,3 +87,75 @@ def test_lyric_edit_and_restore(client):
 def test_responses_ask_browsers_to_revalidate(client):
     assert client.get("/").headers["cache-control"] == "no-cache"
     assert client.get("/api/scores").headers["cache-control"] == "no-cache"
+
+
+def _fake_omr_by_content(monkeypatch, pitches):
+    """Audiveris stand-in: the uploaded bytes name the voice whose MusicXML it returns."""
+    from app import main
+
+    def fake_omr(source, out_dir):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        step, octave = pitches[source.read_bytes().decode()]
+        (out_dir / "x.xml").write_bytes(score(m(1, n(step, octave, 4))))
+        return out_dir / "x.xml"
+
+    monkeypatch.setattr(main, "run_audiveris", fake_omr)
+
+
+def test_parts_upload_is_combined_into_one_score(client, monkeypatch):
+    _fake_omr_by_content(monkeypatch, {"low": ("C", 3), "high": ("E", 5), "mid-high": ("C", 5), "mid-low": ("G", 3)})
+    uploads = [("files", (f"parte {i}.pdf", v.encode())) for i, v in enumerate(["low", "high", "mid-low", "mid-high"])]
+    r = client.post("/api/scores", files=uploads, data={"voices": ["", "", "", ""]})
+    assert r.status_code == 202
+    sid = r.json()["id"]
+    meta = wait_done(client, sid)
+    assert meta["status"] == "done", meta.get("error")
+    # Title: no text on these fake PDFs, so the first file's name.
+    assert meta["title"] == "parte 0" and meta["voices"] == 4 and meta["warnings"] == []
+    # Sources in score order, with the voice found in each and how.
+    assert [(s["filename"], s["voices"][0]["name"], s["voices"][0]["how"]) for s in meta["sources"]] == [
+        ("parte 1.pdf", "Soprano", "alturas"), ("parte 3.pdf", "Contralto", "alturas"),
+        ("parte 2.pdf", "Tenor", "alturas"), ("parte 0.pdf", "Baixo", "alturas"),
+    ]
+    a = client.get(f"/api/scores/{sid}/analysis").json()
+    assert [(v["name"], v["notes"][0]["midi"]) for v in a["voices"]] == [
+        ("Soprano", 76), ("Contralto", 72), ("Tenor", 55), ("Baixo", 48)
+    ]
+    assert client.get(f"/api/scores/{sid}/source?part=0").content == b"high"
+    assert client.get(f"/api/scores/{sid}/source?part=4").status_code == 404
+
+
+def test_voice_chosen_by_the_user_and_title(client, monkeypatch):
+    _fake_omr_by_content(monkeypatch, {"a": ("E", 5), "b": ("C", 5)})
+    files = [("files", ("x.pdf", b"a")), ("files", ("y.pdf", b"b"))]
+    sid = client.post("/api/scores", files=files, data={"voices": ["Solista", ""], "title": "Meu Hino"}).json()["id"]
+    meta = wait_done(client, sid)
+    assert meta["title"] == "Meu Hino"
+    assert [(s["voices"][0]["name"], s["voices"][0]["how"]) for s in meta["sources"]] == [("Solista", "escolhida"), ("Soprano", "alturas")]
+    assert "Meu%20Hino.musicxml" in client.get(f"/api/scores/{sid}/musicxml").headers["content-disposition"]
+
+
+def test_voices_must_match_files(client):
+    files = [("files", ("x.musicxml", score(m(1, n("C", 4, 4))))), ("files", ("y.musicxml", score(m(1, n("C", 4, 4)))))]
+    assert client.post("/api/scores", files=files, data={"voices": ["Soprano"]}).status_code == 400
+
+
+def test_rename_and_reorder_voices(client):
+    xml = score(m(1, n("E", 5, 4)), m(1, n("C", 3, 4)))
+    sid = client.post("/api/scores", files={"file": ("h.musicxml", xml)}).json()["id"]
+    wait_done(client, sid)
+    a = client.get(f"/api/scores/{sid}/analysis").json()
+    assert [(v["id"], v["name"]) for v in a["voices"]] == [("v1", "Soprano"), ("v2", "Baixo")]
+    r = client.put(f"/api/scores/{sid}/voices", json={"voices": [{"id": "v2", "name": "Barítono"}, {"id": "v1", "name": ""}]})
+    assert r.status_code == 200
+    a = client.get(f"/api/scores/{sid}/analysis").json()
+    assert [(v["id"], v["name"], v["auto_name"]) for v in a["voices"]] == [("v2", "Barítono", "Baixo"), ("v1", "Soprano", "Soprano")]
+    assert client.put(f"/api/scores/{sid}/voices", json={"voices": [{"id": "v9"}]}).status_code == 400
+    assert client.put(f"/api/scores/{sid}/voices", json={"voices": []}).status_code == 200
+    assert [v["name"] for v in client.get(f"/api/scores/{sid}/analysis").json()["voices"]] == ["Soprano", "Baixo"]
+
+
+def test_parts_upload_rejects_a_bad_file(client):
+    files = [("files", ("[S] h.musicxml", b"<x/>")), ("files", ("[C] h.docx", b"x"))]
+    r = client.post("/api/scores", files=files)
+    assert r.status_code == 400 and "[C] h.docx" in r.json()["detail"]
