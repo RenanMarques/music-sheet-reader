@@ -47,6 +47,9 @@ class NoteEvent:
     tie_start: bool = False
     tie_stop: bool = False
     is_rest: bool = False
+    # Source <note> elements: (element, measure index, onset in measure, duration), several for
+    # a tied chain. Used to redraw a voice on its own staff (app.layout).
+    src: list = field(default_factory=list, repr=False, compare=False)
 
     @property
     def end(self) -> Fraction:
@@ -180,8 +183,9 @@ def _parse_part(part: ET.Element):
                 staff = el.findtext("staff", "1").strip() or "1"
                 if duration <= 0:
                     continue
+                src = [(el, mi, onset, duration)]
                 if el.find("rest") is not None:
-                    events.append(NoteEvent(onset, duration, -1, part.get("id", "P?"), staff, mi, is_rest=True))
+                    events.append(NoteEvent(onset, duration, -1, part.get("id", "P?"), staff, mi, is_rest=True, src=src))
                     continue
                 if pitch is None:
                     continue
@@ -198,6 +202,7 @@ def _parse_part(part: ET.Element):
                         measure=mi,
                         tie_start="start" in ties,
                         tie_stop="stop" in ties,
+                        src=src,
                     )
                 )
         lengths.append(max_pos)
@@ -222,6 +227,7 @@ def _merge_ties(events: list[NoteEvent]) -> list[NoteEvent]:
         prev = open_ties.get(key)
         if e.tie_stop and prev is not None and abs(prev.end - e.onset) <= Fraction(1, 64):
             prev.duration = e.end - prev.onset
+            prev.src = prev.src + e.src
             if not e.tie_start:
                 prev.tie_start = False
                 del open_ties[key]
@@ -430,9 +436,20 @@ def note_name(midi: int) -> str:
     return f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}"
 
 
-def analyze(data: bytes, title_fallback: str = "Partitura") -> dict:
-    """Parse MusicXML bytes into the playback model consumed by the frontend."""
-    root = _parse_root(data)
+@dataclass
+class Separation:
+    """Voices of a score, before repeats are expanded (see `separate`)."""
+
+    root: ET.Element
+    metas: list[MeasureInfo]  # aligned measure starts/lengths
+    beats: int
+    beat_type: int
+    groups: list[dict]  # per (part, staff): part, part_name, staff, count, voices (lists of NoteEvent)
+    names: list[str]  # one per voice, in group order
+
+
+def separate(root: ET.Element) -> Separation:
+    """Parse a score and split each staff into monophonic voices."""
     parts = root.findall("part")
     if not parts:
         raise MusicXMLError("Partitura sem partes")
@@ -486,6 +503,14 @@ def analyze(data: bytes, title_fallback: str = "Partitura") -> dict:
         )
     total = sum(g["count"] for g in groups)
     names = _voice_names(groups, total, {p.get("id"): p for p in parts})
+    return Separation(root, metas, beats, beat_type, groups, names)
+
+
+def analyze(data: bytes, title_fallback: str = "Partitura") -> dict:
+    """Parse MusicXML bytes into the playback model consumed by the frontend."""
+    sep = separate(_parse_root(data))
+    root, metas, groups, names, beats, beat_type = sep.root, sep.metas, sep.groups, sep.names, sep.beats, sep.beat_type
+    n_measures = len(metas)
 
     # Expand repeats into a performance timeline.
     order = expand_repeats(metas)
