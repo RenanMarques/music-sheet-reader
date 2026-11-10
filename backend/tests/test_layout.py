@@ -1,6 +1,6 @@
 from xml.etree import ElementTree as ET
 
-from app.layout import can_combine, can_separate, combine_staves, separate_staves
+from app.layout import can_combine, can_separate, combine_staves, draw, separate_staves
 from app.lyrics import apply_lyric_edits
 from app.merge import PartFile, merge_scores
 from app.musicxml import analyze
@@ -155,3 +155,162 @@ def test_nothing_to_separate():
     xml = with_clef(score(m(1, n("C", 5, 4)), m(1, n("C", 3, 4))), "G", 2)
     assert not can_separate(xml)
     assert separate_staves(xml) == xml
+
+
+# --------------------------------------------------------------------------- hidden voices
+
+
+def part_ids(xml: bytes) -> list[str]:
+    root = ET.fromstring(xml)
+    ids = [p.get("id") for p in root.findall("part")]
+    assert ids == [sp.get("id") for sp in root.iterfind("part-list/score-part")]
+    return ids
+
+
+def test_hiding_a_voice_of_a_shared_staff_draws_the_other_one_alone():
+    xml = shared_satb()
+    assert part_ids(draw(xml, "parts", hidden={1})[0]) == ["P1__s1v1", "P2"]  # T+B stay as stored
+    out = draw(xml, "parts", hidden={0})[0]
+    assert part_ids(out) == ["P1__s1v2", "P2"]
+    alto = ET.fromstring(out).find("part")
+    assert pitches(alto) == ["C5", "B4", "C5"]
+    assert alto.find(".//lyric/text").text == "Can"  # the top shown voice gets the syllables
+    assert ET.fromstring(out).find("part-list/score-part/part-name").text == "Contralto"
+
+
+def test_hidden_voices_in_the_separate_layout():
+    assert part_ids(draw(shared_satb(), "separate", hidden={2, 3})[0]) == ["P1__s1v1", "P1__s1v2"]
+
+
+def test_hidden_part_is_removed_and_the_rest_still_combines():
+    xml = satb()  # one part per voice: P1..P4
+    assert part_ids(draw(xml, "parts", hidden={0, 3})[0]) == ["P2", "P3"]
+    out = draw(xml, "combined", hidden={1})[0]
+    assert part_ids(out) == ["P1", "P3"]
+    assert [sp.findtext("part-name") for sp in ET.fromstring(out).iterfind("part-list/score-part")] == ["Soprano", "Tenor / Baixo"]
+
+
+def test_hiding_every_voice_is_ignored():
+    xml = shared_satb()
+    assert draw(xml, "parts", hidden={0, 1, 2, 3}) == (xml, [])
+    assert draw(xml, "parts") == (xml, [])
+
+
+def lyric_texts(part: ET.Element) -> list[str | None]:
+    return [x.findtext("lyric/text") for x in part.iter("note") if x.find("chord") is None]
+
+
+def test_lyrics_of_a_hidden_staff_move_to_the_nearest_shown_one():
+    # Only the treble staff has words: hiding S and C must not leave T and B without them.
+    out, moved = draw(shared_satb(), "parts", hidden={0, 1})
+    bass = ET.fromstring(out).find("part")
+    assert bass.get("id") == "P2"
+    assert lyric_texts(bass)[0] == "Can"
+    assert moved == [{"part": "P2", "staff": "1", "verse": "1", "from_part": "P1", "from_staff": "1"}]
+    # Separate layout: onto the tenor (the top voice below), not the bass.
+    out, moved = draw(shared_satb(), "separate", hidden={0, 1})
+    tenor, bass = ET.fromstring(out).findall("part")
+    assert lyric_texts(tenor)[0] == "Can" and not bass.findall(".//lyric")
+    assert moved[0]["part"] == "P2__s1v1"
+    # Hiding the bass only: the words stay where they were.
+    assert draw(shared_satb(), "parts", hidden={3})[1] == []
+
+
+def test_a_staff_with_its_own_words_keeps_them():
+    # One part per voice, S and C each with their own lyrics (per-voice sheets).
+    xml = satb()
+    out, moved = draw(xml, "parts", hidden={0})
+    assert moved == [] and lyric_texts(ET.fromstring(out).find("part"))[2] == "xx"
+    # S and C hidden: the tenor gets the top line (the soprano's), once.
+    out, moved = draw(xml, "parts", hidden={0, 1})
+    assert lyric_texts(ET.fromstring(out).find("part")) == ["Can"]
+    assert [(x["part"], x["from_part"]) for x in moved] == [("P3", "P1")]
+
+
+def test_a_short_noise_line_on_the_shown_staff_is_replaced():
+    word = lambda note, text: note.replace("</note>", LYRIC.format(text), 1)  # noqa: E731
+    treble = m(1, word(n("E", 5), "Can") + n("C", 5, chord=True) + word(n("D", 5), "tam")
+               + n("B", 4, chord=True) + word(n("C", 5, 2), "an"))
+    # The bass staff "sings" one stray syllable (a footer credit read as lyrics).
+    bass = m(1, word(n("G", 3), "Wesley") + n("C", 3, chord=True) + n("G", 3) + n("G", 2, chord=True)
+             + n("E", 3, 2) + n("A", 2, 2, chord=True))
+    out, moved = draw(score(treble, bass), "parts", hidden={0, 1})
+    assert [t.text for t in ET.fromstring(out).iter("text")] == ["Can", "tam", "an"] and moved
+
+
+# --------------------------------------------------------------------------- lyric carrier voice
+
+
+def sung(note: str, text: str, syllabic: str = "single") -> str:
+    return note.replace("</note>", f'<lyric number="1"><syllabic>{syllabic}</syllabic><text>{text}</text></lyric></note>', 1)
+
+
+def anjos() -> bytes:
+    """"Can-tam an-jos": the soprano has a dotted quarter + eighth where the alto and the lower
+    voices sing quarters (the opening of Cantam Anjos)."""
+    treble = m(1, sung(n("A", 4, 2), "Can", "begin") + n("F", 4, 2, chord=True)
+               + sung(n("A", 4, 2), "tam", "end") + n("F", 4, 2, chord=True)
+               + sung(n("C", 5, 3), "an", "begin") + n("A", 4, 4, chord=True)  # alto holds a half note
+               + sung(n("B", 4, 1), "jos", "end"), )
+    bass = m(1, n("F", 3, 2) + n("F", 2, 2, chord=True) + n("F", 3, 2) + n("F", 2, 2, chord=True)
+             + n("F", 3, 2) + n("F", 2, 2, chord=True) + n("C", 3, 2) + n("C", 2, 2, chord=True))
+    xml = score(treble, bass, divisions=2)
+    xml = xml.replace(b"</time></attributes>", b"</time><clef><sign>G</sign><line>2</line></clef></attributes>", 1)
+    i = xml.index(b'<part id="P2">')
+    return xml[:i] + xml[i:].replace(b"</time></attributes>", b"</time><clef><sign>F</sign><line>4</line></clef></attributes>", 1)
+
+
+def carrier_notes(part: ET.Element) -> list[ET.Element]:
+    return [x for x in part.iter("note") if x.get("print-object") == "no"]
+
+
+def test_syllables_between_the_shown_notes_go_on_an_invisible_voice():
+    out, moved = draw(anjos(), "parts", hidden={0, 1})
+    bass = ET.fromstring(out).find("part")
+    assert bass.get("id") == "P2" and moved[0]["from_part"] == "P1"
+    words = carrier_notes(bass)
+    assert [(x.findtext("lyric/text"), x.findtext("duration"), x.findtext("voice")) for x in words] == [
+        ("Can", "2", "5"), ("tam", "2", "5"), ("an", "3", "5"), ("jos", "1", "5")
+    ]
+    assert [x.findtext("type") for x in words] == ["quarter", "quarter", "quarter", "eighth"]
+    visible = [x for x in bass.iter("note") if x.get("print-object") != "no"]
+    assert not any(x.find("lyric") is not None for x in visible)
+    # Explicit stems (with two voices the drawing would force them all one way): these chords lie
+    # below the middle line, so up.
+    assert [x.findtext("stem") for x in visible] == ["up"] * 8
+    # The drawing is the same music: the invisible voice is not counted.
+    assert voices_of(analyze(draw(anjos(), "parts", hidden={0, 1})[0]))[-1] == voices_of(analyze(anjos()))[-1]
+
+
+def test_syllables_that_fit_the_shown_notes_stay_on_them():
+    out, _ = draw(shared_satb(), "parts", hidden={0, 1})
+    assert not carrier_notes(ET.fromstring(out).find("part"))
+
+
+def test_split_staff_whose_top_voice_is_hidden_keeps_every_syllable():
+    # Alto alone: it holds a half note under "an-jos".
+    out, moved = draw(anjos(), "parts", hidden={0})
+    alto = ET.fromstring(out).find("part")
+    assert alto.get("id") == "P1__s1v2" and moved == []
+    assert [x.findtext("lyric/text") for x in carrier_notes(alto)] == ["Can", "tam", "an", "jos"]
+    # Soprano shown: its own notes carry the words, no invisible voice.
+    out, _ = draw(anjos(), "separate")
+    soprano = ET.fromstring(out).find("part")
+    assert not carrier_notes(soprano) and [x.findtext("lyric/text") for x in soprano.iter("note")] == ["Can", "tam", "an", "jos"]
+
+
+def test_invisible_lyric_voice_survives_combining():
+    out, _ = draw(anjos(), "combined", hidden={0, 1})  # nothing to combine: T+B already share P2
+    assert len(carrier_notes(ET.fromstring(out).find("part"))) == 4
+    # One part per voice (per-voice sheets): S and C hidden, T+B combined; the words stay.
+    s = with_clef(score(m(1, sung(n("A", 4, 2), "Can", "begin") + sung(n("A", 4, 1), "tam", "end")
+                          + sung(n("C", 5, 1), "an", "begin")), divisions=2), "G", 2)
+    c = with_clef(score(m(1, n("F", 4, 4))), "G", 2)
+    t = with_clef(score(m(1, n("C", 4, 4))), "F", 4)
+    b = with_clef(score(m(1, n("F", 3, 4))), "F", 4)
+    xml = merge_scores([PartFile(xml=x, label=f"{i}") for i, x in enumerate([s, c, t, b])], "Hino").xml
+    out, moved = draw(xml, "combined", hidden={0, 1})
+    tb = ET.fromstring(out).find("part")
+    assert [x.findtext("lyric/text") for x in carrier_notes(tb)] == ["Can", "tam", "an"]
+    assert {x.findtext("voice") for x in carrier_notes(tb)} == {"5"}
+    assert moved[0]["part"] == tb.get("id")

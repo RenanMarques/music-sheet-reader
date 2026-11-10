@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -31,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .lyrics import LyricsError, apply_lyric_edits, normalize_lyrics
-from .layout import can_combine, can_separate, combine_staves, separate_staves
+from .layout import can_combine, can_separate, draw
 from .merge import PartFile, merge_scores
 from .sheettext import common_title, credit_lines, pdf_lines
 from .voices import voice_from_lines
@@ -336,27 +337,28 @@ def set_voice_layout(score_id: str, body: VoiceLayout) -> dict:
 
 
 @app.get("/api/scores/{score_id}/musicxml")
-def get_musicxml(score_id: str, layout: str = "parts") -> Response:
-    """The score as stored, or a drawing layout (see app.layout): `layout=combined`, same-clef
+def get_musicxml(score_id: str, layout: str = "parts", hide: str = "") -> Response:
+    """The score as stored, or a drawing (see app.layout.draw): `layout=combined`, same-clef
     voices sharing a staff; `layout=separate`, each voice of a shared staff on its own staff,
-    named as in the mixer."""
+    named as in the mixer; `hide=v2,v4`, those voices (analysis ids) left out of the drawing."""
     d = _dir(score_id)
     f = d / "score.xml"
     if not f.exists():
         raise HTTPException(409, "Partitura ainda não processada")
-    if layout == "combined":
-        with _edit_lock:
-            data = f.read_bytes()
-        return Response(combine_staves(data), media_type="application/vnd.recordare.musicxml+xml")
-    if layout == "separate":
+    hidden = {int(v[1:]) - 1 for v in hide.split(",") if re.fullmatch(r"v[1-9]\d*", v.strip())} if hide else set()
+    if layout in ("combined", "separate") or hidden:
         with _edit_lock:
             data = f.read_bytes()
         names = None
-        if (d / "analysis.json").exists():
-            analysis = _apply_voice_layout(json.loads((d / "analysis.json").read_text()), _read_meta(d).get("voice_layout"))
-            by_id = {v["id"]: v["name"] for v in analysis["voices"]}
-            names = [by_id.get(f"v{i + 1}") for i in range(len(by_id))]
-        return Response(separate_staves(data, names), media_type="application/vnd.recordare.musicxml+xml")
+        if layout == "separate" or hidden:  # split staves are named as in the mixer
+            if (d / "analysis.json").exists():
+                analysis = _apply_voice_layout(json.loads((d / "analysis.json").read_text()), _read_meta(d).get("voice_layout"))
+                by_id = {v["id"]: v["name"] for v in analysis["voices"]}
+                names = [by_id.get(f"v{i + 1}") for i in range(len(by_id))]
+        xml, moved = draw(data, layout, names, hidden)
+        # Lyric lines moved off hidden staves: where a lyric edit made on them must go.
+        headers = {"X-Lyrics-From": json.dumps(moved)} if moved else {}
+        return Response(xml, media_type="application/vnd.recordare.musicxml+xml", headers=headers)
     meta = _read_meta(d)
     name = (meta.get("title") or Path(meta["filename"]).stem) + ".musicxml"
     return FileResponse(

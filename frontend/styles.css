@@ -194,8 +194,8 @@ button.edit-toggle[aria-pressed="true"] { background: var(--accent); color: var(
 
 .track {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-  grid-template-areas: "name now m s" "fader fader fader fader";
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas: "name name v m s" "fader fader fader fader now";
   align-items: center;
   column-gap: 6px; row-gap: 8px;
   padding: 10px 10px 10px 12px;
@@ -219,9 +219,16 @@ button.edit-toggle[aria-pressed="true"] { background: var(--accent); color: var(
   from { background: var(--c); box-shadow: 0 0 8px var(--c); }
   to { background: var(--console-line); box-shadow: none; }
 }
-.track button.m, .track button.s {
+.track button.m, .track button.s, .track button.v {
   width: 28px; height: 26px; padding: 0; font-size: .8rem; font-weight: 700; border-radius: 4px;
 }
+.track button.v { grid-area: v; display: grid; place-items: center; }
+.track button.v svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.track button.v.on { color: var(--console-muted); border-style: dashed; }
+.track button.v:disabled { opacity: .35; cursor: default; }
+/* Left out of the drawing (still plays): the name fades, the colour bar turns into a dashed line. */
+.track.offscore { border-left-style: dashed; }
+.track.offscore .name strong { color: var(--console-muted); }
 .track button.m { grid-area: m; }
 .track button.s { grid-area: s; }
 .track button.m.on { background: #d97706; border-color: #d97706; color: #fff; }
@@ -313,9 +320,9 @@ button.edit-toggle[aria-pressed="true"] { background: var(--accent); color: var(
   .mixer-head { padding: 8px 10px 4px; }
   .tracks { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding-bottom: 8px; }
   .track {
-    min-width: 200px;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-areas: "name m s" "fader fader now";
+    min-width: 236px;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-areas: "name v m s" "fader fader fader now";
   }
   .track .range { display: none; }
   .hint { display: none; }

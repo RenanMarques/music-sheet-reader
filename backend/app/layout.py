@@ -17,10 +17,10 @@ from __future__ import annotations
 import copy
 import re
 from fractions import Fraction
-from math import lcm
+from math import gcd, lcm
 from xml.etree import ElementTree as ET
 
-from .lyrics import _insert_lyric
+from .lyrics import _group, _host, _insert_lyric, _iter_notes
 from .musicxml import _parse_root, separate
 from .voices import find_type
 
@@ -98,6 +98,7 @@ def _combine_group(parts: list[ET.Element]) -> ET.Element:
                     m.append(el)
                     continue
                 el = copy.deepcopy(el)
+                carrier = _is_carrier(el)
                 dur = el.find("duration")
                 if dur is not None and (dur.text or "").strip():
                     dur.text = str(int(Fraction(int(float(dur.text))) * scale))
@@ -108,7 +109,10 @@ def _combine_group(parts: list[ET.Element]) -> ET.Element:
                     pos -= d
                 elif el.tag == "forward":
                     pos += d
-                    _set_child(el, "voice", str(j + 1), ("duration", "footnote", "level"))
+                    _set_child(el, "voice", str(CARRIER_VOICE + j if carrier else j + 1), ("duration", "footnote", "level"))
+                elif carrier:  # a lyric line's invisible voice (place_lyrics): kept, with its words
+                    pos += d
+                    _set_child(el, "voice", str(CARRIER_VOICE + j), _BEFORE_VOICE)
                 else:
                     if el.find("chord") is None and el.find("grace") is None:
                         pos += d
@@ -304,7 +308,9 @@ def _attributes_for_staff(attrs: ET.Element, staff: str) -> ET.Element:
     return attrs
 
 
-def _separate_part(part: ET.Element, group: dict, v: int, first: bool, metas, common: int, lyrics, owner) -> ET.Element:
+def _separate_part(part: ET.Element, group: dict, v: int, first: bool, staff_first: bool, metas, common: int) -> ET.Element:
+    """One voice of a part's staff as a part of its own. `first`: the first new part made from
+    this part (gets its unnumbered directions); `staff_first`: the first drawn voice of its staff."""
     staff = group["staff"]
     plan = group["plans"][v]
     out = ET.Element("part", id=split_part_id(part.get("id"), staff, v + 1))
@@ -332,7 +338,7 @@ def _separate_part(part: ET.Element, group: dict, v: int, first: bool, metas, co
                     el.find("divisions").text = str(common)
             elif el.tag in _ONCE:
                 own = el.findtext("staff")
-                if v != 0 or (own.strip() != staff if own else not first):
+                if not staff_first or (own.strip() != staff if own else not first):
                     continue
                 el = copy.deepcopy(el)
                 if el.find("staff") is not None:
@@ -365,9 +371,6 @@ def _separate_part(part: ET.Element, group: dict, v: int, first: bool, metas, co
             if untie:
                 _set_value(note, d, common)
                 _untie_start(note)
-            if owner.get((mi, on)) == v:
-                for ly in lyrics.get((mi, on), {}).values():
-                    _insert_lyric(note, copy.deepcopy(ly))
             placed.append((on, 1, note))
             notes.append(note)
             cursor = on + d
@@ -378,13 +381,37 @@ def _separate_part(part: ET.Element, group: dict, v: int, first: bool, metas, co
     return out
 
 
-def separate_staves(data: bytes, names: list[str] | None = None) -> bytes:
-    """MusicXML with each voice of a shared staff on its own staff (unchanged if there are none).
-    `names`: one per analysis voice (in analysis order), e.g. the user's names; default: detected."""
+def separate_staves(data: bytes, names: list[str] | None = None, hidden: set[int] = frozenset(), split_all: bool = True) -> bytes:
+    """MusicXML with each voice of a shared staff on its own staff (unchanged if there is nothing to do);
+    see `_separate_tree`."""
+    return _separate_and_place(data, names, hidden, split_all)[0]
+
+
+def _separate_and_place(data: bytes, names, hidden, split_all) -> tuple[bytes, list[dict]]:
     root = _parse_root(data)
+    if not _separate_tree(root, names, hidden, split_all):
+        return data, []
+    moved = place_lyrics(_parse_root(data), root)
+    ET.indent(root)
+    return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8"), moved
+
+
+def _separate_tree(root: ET.Element, names: list[str] | None, hidden: set[int], split_all: bool) -> bool:
+    """Splits shared staves of `root` in place, one part per voice; returns whether anything changed.
+    Lyrics are left out: `place_lyrics` draws them afterwards.
+
+    `names`: one per analysis voice (in analysis order), e.g. the user's names; default: detected.
+    `hidden`: analysis voice indexes left out of the drawing. Parts whose voices are all hidden are
+    removed; a staff where only some are hidden is split, so the others can be drawn alone.
+    `split_all=False` splits only those staves (the drawing otherwise keeps the stored staves).
+    Hiding every voice is ignored (an empty score cannot be drawn)."""
     sep = separate(root)
-    if not any(g["count"] > 1 for g in sep.groups):
-        return data
+    total = sum(len(g["voices"]) for g in sep.groups)
+    hidden = {i for i in hidden if 0 <= i < total}
+    if len(hidden) == total:
+        hidden = set()
+    if not hidden and not (split_all and any(g["count"] > 1 for g in sep.groups)):
+        return False
     names = [(names[i] if names and i < len(names) and names[i] else n) for i, n in enumerate(sep.names)]
     part_list = root.find("part-list")
     score_parts = {sp.get("id"): sp for sp in part_list.findall("score-part")}
@@ -393,42 +420,41 @@ def separate_staves(data: bytes, names: list[str] | None = None) -> bytes:
     by_part: dict[str, list[dict]] = {}
     for g in sep.groups:
         g["names"] = names[vi : vi + len(g["voices"])]
+        g["shown"] = [v for v in range(len(g["voices"])) if vi + v not in hidden]
         vi += len(g["voices"])
         by_part.setdefault(g["part"], []).append(g)
 
     for part in root.findall("part"):
         groups = by_part.get(part.get("id"), [])
-        if not any(g["count"] > 1 for g in groups):
+        if not groups:
+            continue  # no notes at all: drawn as stored
+        sp = score_parts.get(part.get("id"))
+        if not any(g["shown"] for g in groups):
+            root.remove(part)
+            if sp is not None:
+                part_list.remove(sp)
+            continue
+        partly_hidden = any(len(g["shown"]) < len(g["voices"]) for g in groups)
+        if not partly_hidden and not (split_all and any(g["count"] > 1 for g in groups)):
             continue
         divs = _divisions_values(part)
         fractions = [mt.length for mt in metas]
         new_parts = []
         for g in groups:
             g["plans"] = [_plan_voice(line, metas) for line in g["voices"]]
-            # Lyrics of every note at an onset, drawn on the highest voice singing there.
-            lyrics: dict[tuple, dict] = {}
-            owner: dict[tuple, int] = {}
-            for v, plan in enumerate(g["plans"]):
-                for mi, items in plan.items():
-                    for el, on, d, _ in items:
-                        owner.setdefault((mi, on), v)
+            for v in g["shown"]:
+                for items in g["plans"][v].values():
+                    for _, on, d, _ in items:
                         fractions += [on, d]
-            for line in g["voices"]:
-                for e in line:
-                    for el, mi, on, _ in e.src:
-                        for ly in el.findall("lyric"):
-                            lyrics.setdefault((mi, on), {}).setdefault(ly.get("number", "1"), ly)
-            g["lyrics"], g["owner"] = lyrics, owner
         common = lcm(*divs, *[f.denominator for f in fractions])
-        for gi, g in enumerate(groups):
-            for v in range(len(g["voices"])):
-                new_parts.append((g, v, _separate_part(part, g, v, gi == 0, metas, common, g["lyrics"], g["owner"])))
-        # Replace the part (and its score-part) by one per voice.
+        for g in groups:
+            for v in g["shown"]:
+                new_parts.append((g, v, _separate_part(part, g, v, not new_parts, v == g["shown"][0], metas, common)))
+        # Replace the part (and its score-part) by one per shown voice.
         idx = list(root).index(part)
         root.remove(part)
         for k, (_, _, p) in enumerate(new_parts):
             root.insert(idx + k, p)
-        sp = score_parts.get(part.get("id"))
         if sp is not None:
             sp_idx = list(part_list).index(sp)
             part_list.remove(sp)
@@ -454,5 +480,251 @@ def separate_staves(data: bytes, names: list[str] | None = None) -> bytes:
                 elif pa is not None:
                     new_sp.remove(pa)
                 part_list.insert(sp_idx + k, new_sp)
-    ET.indent(root)
-    return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+    return True
+
+
+def _origin(part: str, staff: str) -> tuple[str, str]:
+    """The stored (part, staff) a drawn staff comes from (split parts: `P1__s1v2` -> P1, 1)."""
+    m = re.fullmatch(rf"(.*){SPLIT_MARK}([^v]+)v\d+", part)
+    return (m.group(1), m.group(2)) if m else (part, staff)
+
+
+def _lyric_lines(root: ET.Element) -> tuple[list[tuple], dict[tuple, dict[str, dict]]]:
+    """Staves in score order and, per staff, its lyric lines: {verse: {(measure, onset): <lyric>}}."""
+    order: list[tuple] = []
+    lines: dict[tuple, dict[str, dict]] = {}
+    for n in _iter_notes(root):
+        key = (n.part, n.staff)
+        if key not in lines:
+            order.append(key)
+            lines[key] = {}
+        for ly in n.el.findall("lyric"):
+            lines[key].setdefault(ly.get("number", "1"), {}).setdefault((n.measure, n.onset), ly)
+    return order, lines
+
+
+# --------------------------------------------------------------------------- lyrics on drawn staves
+
+CARRIER_VOICE = 5  # MusicXML voice of the invisible notes that carry a lyric line (and up, when combined)
+_STEPS = "CDEFGAB"
+_CLEF_NOTE = {"G": ("G", 4), "F": ("F", 3), "C": ("C", 4)}
+
+
+def _diatonic(step: str, octave: int) -> int:
+    return octave * 7 + _STEPS.index(step)
+
+
+def _middle_line(part: ET.Element, staff: str) -> int:
+    """Diatonic position of the middle line of a staff (from its first clef)."""
+    for clef in part.iter("clef"):
+        if clef.get("number", staff) != staff:
+            continue
+        sign = clef.findtext("sign", "G").strip()
+        if sign not in _CLEF_NOTE:
+            return _diatonic("B", 4)  # percussion/TAB: any position will do
+        step, octave = _CLEF_NOTE[sign]
+        line = int(clef.findtext("line") or {"G": 2, "F": 4, "C": 3}[sign])
+        return _diatonic(step, octave) + (3 - line) * 2 + 7 * int(clef.findtext("clef-octave-change") or 0)
+    return _diatonic("B", 4)
+
+
+def _is_carrier(el: ET.Element) -> bool:
+    voice = (el.findtext("voice") or "").strip()
+    return voice.isdigit() and int(voice) >= CARRIER_VOICE and (el.tag == "forward" or el.get("print-object") == "no")
+
+
+def _set_stems(part: ET.Element, staff: str, middle: int) -> None:
+    """Explicit stems for the visible notes of a staff that gets a carrier voice (with two voices,
+    the drawing would otherwise turn every stem up): away from the farthest notehead, as usual."""
+    chords: list[list[ET.Element]] = []
+    for measure in part.findall("measure"):
+        for el in measure.findall("note"):
+            if el.find("rest") is not None or _is_carrier(el) or (el.findtext("staff") or "1").strip() != staff:
+                continue
+            if el.find("chord") is not None and chords:
+                chords[-1].append(el)
+            else:
+                chords.append([el])
+    for chord in chords:
+        if any(n.find("stem") is not None for n in chord):
+            continue
+        pos = [_diatonic(n.findtext("pitch/step", "B").strip(), int(n.findtext("pitch/octave", "4"))) for n in chord if n.find("pitch") is not None]
+        if not pos:
+            continue
+        up, down = max(pos) - middle, middle - min(pos)
+        for n in chord:
+            _set_child(n, "stem", "down" if up >= down else "up", _BEFORE_STEM)
+
+
+def _rescale(part: ET.Element, k: int) -> None:
+    for el in part.iter():
+        if el.tag in ("divisions", "duration") and (el.text or "").strip():
+            el.text = str(int(float(el.text)) * k)
+
+
+def _add_carrier(part: ET.Element, staff: str, verses: dict[str, dict]) -> None:
+    """A lyric line on invisible notes of its own voice, in the rhythm of the syllables: every
+    syllable is drawn even where the staff's own notes don't start, hyphens included (they are
+    only drawn within one voice)."""
+    multi = any(int(s.text or 1) > 1 for s in part.iter("staves"))
+    middle = _middle_line(part, staff)
+    by_measure: dict[int, dict[Fraction, dict[str, ET.Element]]] = {}
+    for verse, syllables in verses.items():
+        for (mi, on), ly in syllables.items():
+            by_measure.setdefault(mi, {}).setdefault(on, {})[verse] = ly
+    measures = part.findall("measure")
+    # Divisions in force per measure, and a common factor so every syllable onset is a whole number.
+    divs, d, k = [], 1, 1
+    for measure in measures:
+        for att in measure.findall("attributes"):
+            if att.findtext("divisions"):
+                d = max(1, int(float(att.findtext("divisions"))))
+        divs.append(d)
+    for mi, onsets in by_measure.items():
+        if mi < len(measures):
+            for on in onsets:
+                k = lcm(k, on.denominator // gcd(on.denominator, divs[mi]))
+    if k > 1:
+        _rescale(part, k)
+        divs = [x * k for x in divs]
+    voice = str(CARRIER_VOICE)
+    for mi, onsets in sorted(by_measure.items()):
+        if mi >= len(measures):
+            continue
+        measure, div = measures[mi], divs[mi]
+        # Where the measure's content ends (insertion point: before the closing barlines).
+        children = list(measure)
+        insert_at = next((i for i, c in enumerate(children) if c.tag == "barline" and c.get("location", "right") == "right"
+                          and all(x.tag == "barline" for x in children[i:])), len(children))
+        pos = end = Fraction(0)
+        starts: dict[Fraction, ET.Element] = {}
+        for el in children[:insert_at]:
+            if el.tag in ("backup", "forward", "note"):
+                dur = Fraction(int(float(el.findtext("duration") or 0)), div)
+                if el.tag == "backup":
+                    pos = max(Fraction(0), pos - dur)
+                elif el.tag == "forward":
+                    pos += dur
+                elif el.find("chord") is None and el.find("grace") is None:
+                    if el.find("rest") is None and (el.findtext("staff") or "1").strip() == staff:
+                        starts.setdefault(pos, el)
+                    pos += dur
+                end = max(end, pos)
+        times = sorted(on for on in onsets if on < end)
+        if not times:
+            continue
+        block: list[ET.Element] = []
+        if pos > 0:
+            backup = ET.Element("backup")
+            ET.SubElement(backup, "duration").text = str(int(pos * div))
+            block.append(backup)
+        if times[0] > 0:
+            fwd = ET.Element("forward")
+            ET.SubElement(fwd, "duration").text = str(int(times[0] * div))
+            ET.SubElement(fwd, "voice").text = voice
+            if multi:
+                ET.SubElement(fwd, "staff").text = staff
+            block.append(fwd)
+        for i, on in enumerate(times):
+            length = (times[i + 1] if i + 1 < len(times) else end) - on
+            note = ET.Element("note", {"print-object": "no"})
+            pitch = ET.SubElement(note, "pitch")
+            same = starts.get(on)
+            if same is not None and same.find("pitch") is not None:  # a unison never pushes a visible notehead aside
+                for tag in ("step", "alter", "octave"):
+                    if same.find(f"pitch/{tag}") is not None:
+                        ET.SubElement(pitch, tag).text = same.findtext(f"pitch/{tag}")
+            else:
+                ET.SubElement(pitch, "step").text = _STEPS[middle % 7]
+                ET.SubElement(pitch, "octave").text = str(middle // 7)
+            ET.SubElement(note, "duration").text = str(int(length * div))
+            ET.SubElement(note, "voice").text = voice
+            value = _value(length)
+            if value:
+                ET.SubElement(note, "type").text = value[0]
+                for _ in range(value[1]):
+                    ET.SubElement(note, "dot")
+            if multi:
+                ET.SubElement(note, "staff").text = staff
+            for _, ly in sorted(onsets[on].items(), key=lambda x: _verse_order(x[0])):
+                note.append(copy.deepcopy(ly))
+            block.append(note)
+        for j, el in enumerate(block):
+            measure.insert(insert_at + j, el)
+    _set_stems(part, staff, middle)
+
+
+def _verse_order(verse: str):
+    return (0, int(verse)) if verse.isdigit() else (1, verse)
+
+
+def place_lyrics(stored: ET.Element, drawn: ET.Element) -> list[dict]:
+    """Draws the lyric lines of every stored staff that is not drawn as stored.
+
+    - A split staff (some or all of its voices on staves of their own): on the top drawn one.
+    - A staff whose voices are all hidden: on the nearest drawn staff (below, else above), for
+      every verse that staff has no line of its own (a line with under half the syllables is OCR
+      noise and is replaced), so any voice left on the page shows the words.
+
+    The syllables go on the target staff's notes when every one of them has a note starting there
+    in one voice; otherwise the line gets an invisible voice of its own (`_add_carrier`), so no
+    syllable is lost where the rhythms differ. Returns where each line moved to another staff
+    came from, for lyric edits: [{part, staff, verse (drawn), from_part, from_staff}]."""
+    order, lines = _lyric_lines(stored)
+    drawn_order, drawn_lines = _lyric_lines(drawn)
+    origins = {d: _origin(*d) for d in drawn_order}
+    index = {k: i for i, k in enumerate(order)}
+    plan: dict[tuple, dict[str, dict]] = {}
+    moved = []
+    for src in order:
+        if not lines[src]:
+            continue
+        mine = [d for d in drawn_order if origins[d] == src]
+        if src in mine:
+            continue  # drawn as stored, lyrics included
+        if mine:
+            target, foreign = mine[0], False
+        else:
+            below = [d for d in drawn_order if index.get(origins[d], -1) > index[src]]
+            above = [d for d in drawn_order if -1 < index.get(origins[d], -1) < index[src]]
+            target, foreign = (below[0] if below else (above[-1] if above else None)), True
+            if target is None:
+                continue
+        for verse, syllables in lines[src].items():
+            if verse in plan.get(target, {}):
+                continue  # already gets this verse from a staff above
+            if foreign:
+                own = drawn_lines[target].get(verse)
+                if own and len(own) >= len(syllables) / 2:
+                    continue  # the staff has its own words for this verse
+                if own:  # a much shorter line: OCR noise (credits read as lyrics), replaced
+                    for n in _iter_notes(drawn):
+                        if (n.part, n.staff) == target:
+                            for ly in n.el.findall("lyric"):
+                                if ly.get("number", "1") == verse:
+                                    n.el.remove(ly)
+                moved.append({"part": target[0], "staff": target[1], "verse": verse, "from_part": src[0], "from_staff": src[1]})
+            plan.setdefault(target, {})[verse] = syllables
+    if not plan:
+        return moved
+    groups = _group(drawn)
+    parts = {p.get("id"): p for p in drawn.findall("part")}
+    for target, verses in plan.items():
+        hosts = {key: _host(groups.get((*target, *key), [])) for syl in verses.values() for key in syl}
+        if all(hosts.values()) and len({h.voice for h in hosts.values()}) == 1:
+            for syllables in verses.values():
+                for key, ly in syllables.items():
+                    _insert_lyric(hosts[key].el, copy.deepcopy(ly))
+        else:
+            _add_carrier(parts[target[0]], target[1], verses)
+    return moved
+
+
+def draw(data: bytes, layout: str = "parts", names: list[str] | None = None, hidden: set[int] = frozenset()) -> tuple[bytes, list[dict]]:
+    """The MusicXML to draw: `layout` ("parts" as stored, "combined", "separate") without the
+    `hidden` voices (analysis indexes), and where lyric lines moved off hidden staves came from
+    (`place_lyrics`)."""
+    moved: list[dict] = []
+    if hidden or layout == "separate":
+        data, moved = _separate_and_place(data, names, hidden, split_all=layout == "separate")
+    return (combine_staves(data) if layout == "combined" else data), moved
