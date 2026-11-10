@@ -1,6 +1,6 @@
 from xml.etree import ElementTree as ET
 
-from app.layout import can_combine, can_separate, combine_staves, separate_staves
+from app.layout import can_combine, can_separate, combine_staves, draw, separate_staves
 from app.lyrics import apply_lyric_edits
 from app.merge import PartFile, merge_scores
 from app.musicxml import analyze
@@ -155,3 +155,42 @@ def test_nothing_to_separate():
     xml = with_clef(score(m(1, n("C", 5, 4)), m(1, n("C", 3, 4))), "G", 2)
     assert not can_separate(xml)
     assert separate_staves(xml) == xml
+
+
+# --------------------------------------------------------------------------- hidden voices
+
+
+def part_ids(xml: bytes) -> list[str]:
+    root = ET.fromstring(xml)
+    ids = [p.get("id") for p in root.findall("part")]
+    assert ids == [sp.get("id") for sp in root.iterfind("part-list/score-part")]
+    return ids
+
+
+def test_hiding_a_voice_of_a_shared_staff_draws_the_other_one_alone():
+    xml = shared_satb()
+    assert part_ids(draw(xml, "parts", hidden={1})) == ["P1__s1v1", "P2"]  # T+B stay as stored
+    out = draw(xml, "parts", hidden={0})
+    assert part_ids(out) == ["P1__s1v2", "P2"]
+    alto = ET.fromstring(out).find("part")
+    assert pitches(alto) == ["C5", "B4", "C5"]
+    assert alto.find(".//lyric/text").text == "Can"  # the top shown voice gets the syllables
+    assert ET.fromstring(out).find("part-list/score-part/part-name").text == "Contralto"
+
+
+def test_hidden_voices_in_the_separate_layout():
+    assert part_ids(draw(shared_satb(), "separate", hidden={2, 3})) == ["P1__s1v1", "P1__s1v2"]
+
+
+def test_hidden_part_is_removed_and_the_rest_still_combines():
+    xml = satb()  # one part per voice: P1..P4
+    assert part_ids(draw(xml, "parts", hidden={0, 3})) == ["P2", "P3"]
+    out = draw(xml, "combined", hidden={1})
+    assert part_ids(out) == ["P1", "P3"]
+    assert [sp.findtext("part-name") for sp in ET.fromstring(out).iterfind("part-list/score-part")] == ["Soprano", "Tenor / Baixo"]
+
+
+def test_hiding_every_voice_is_ignored():
+    xml = shared_satb()
+    assert draw(xml, "parts", hidden={0, 1, 2, 3}) == xml
+    assert draw(xml, "parts") == xml

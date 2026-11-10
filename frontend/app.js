@@ -99,6 +99,7 @@
     loadToken: 0,
     transpose: 0, // semitones applied to playback and to the drawn score (per score, saved locally)
     layout: "parts", // "parts" | "combined" | "separate" staves (per score, saved locally)
+    hidden: new Set(), // ids of voices left out of the drawing (per score, saved locally)
   };
 
   // ------------------------------------------------------------------ API
@@ -371,14 +372,16 @@
     $("status-text").textContent = "Carregando…";
     try {
       const layout = loadLayout(id, meta);
+      const hidden = loadHidden(id, meta.voices);
       const [analysis, xml] = await Promise.all([
         api(`/api/scores/${id}/analysis`),
-        fetch(scoreXmlUrl(id, layout), { cache: "no-cache" }).then((r) => r.text()),
+        fetch(scoreXmlUrl(id, layout, hidden), { cache: "no-cache" }).then((r) => r.text()),
       ]);
       if (token !== state.loadToken) return;
       state.analysis = analysis;
       state.meta = meta;
       state.layout = layout;
+      state.hidden = hidden;
       renderLayoutButton();
       state.transpose = loadTranspose(id);
       setEditing(false);
@@ -498,8 +501,55 @@
     return LAYOUTS[saved] && meta[LAYOUTS[saved]] ? saved : "parts";
   }
 
-  function scoreXmlUrl(id, layout) {
-    return `/api/scores/${id}/musicxml` + (LAYOUTS[layout] ? `?layout=${layout}` : "");
+  function scoreXmlUrl(id, layout, hidden) {
+    const q = new URLSearchParams();
+    if (LAYOUTS[layout]) q.set("layout", layout);
+    if (hidden && hidden.size) q.set("hide", [...hidden].sort().join(","));
+    const qs = q.toString();
+    return `/api/scores/${id}/musicxml` + (qs ? `?${qs.replace(/%2C/g, ",")}` : "");
+  }
+
+  // ------------------------------------------------------------------ hidden voices
+  // The eye button of a mixer row leaves that voice out of the drawing (`hide=` on the MusicXML
+  // request, see app/layout.py draw()); it still plays. A voice sharing a staff with others is
+  // drawn alone on its staff when another one is hidden. Saved per score; at least one voice
+  // always stays visible.
+
+  function loadHidden(id, count) {
+    try {
+      const ids = JSON.parse(localStorage.getItem(`hidden:${id}`) || "[]");
+      const ok = ids.filter((v) => typeof v === "string" && /^v\d+$/.test(v) && Number(v.slice(1)) <= count);
+      return ok.length < count ? new Set(ok) : new Set();
+    } catch (_) { return new Set(); }
+  }
+
+  async function toggleHidden(voiceId) {
+    if (!state.osmd || !state.id) return;
+    if (state.hidden.has(voiceId)) state.hidden.delete(voiceId);
+    else if (state.hidden.size < state.analysis.voices.length - 1) state.hidden.add(voiceId);
+    else return;
+    try { localStorage.setItem(`hidden:${state.id}`, JSON.stringify([...state.hidden])); } catch (_) { /* private mode */ }
+    renderHiddenButtons();
+    closeLyricEditor();
+    await reloadScoreXml();
+  }
+
+  function renderHiddenButtons() {
+    const last = state.hidden.size >= state.analysis.voices.length - 1;
+    state.analysis.voices.forEach((info, i) => {
+      const el = state.voices[i] && state.voices[i].el;
+      if (!el) return;
+      const hidden = state.hidden.has(info.id);
+      const btn = el.querySelector(".v");
+      btn.innerHTML = hidden ? ICON_EYE_OFF : ICON_EYE;
+      btn.classList.toggle("on", hidden);
+      btn.setAttribute("aria-pressed", String(hidden));
+      btn.disabled = !hidden && last;
+      btn.title = hidden ? `Mostrar ${info.name} na partitura`
+        : last ? "Pelo menos uma voz fica na partitura" : `Ocultar ${info.name} da partitura (continua tocando)`;
+      btn.setAttribute("aria-label", hidden ? `Mostrar ${info.name} na partitura` : `Ocultar ${info.name} da partitura`);
+      el.classList.toggle("offscore", hidden);
+    });
   }
 
   /** A part of the separated layout is one voice of an original (part, staff): `P1__s1v2`. */
@@ -794,6 +844,8 @@
     for (const v of state.voices) showNote(v, null);
   }
 
+  const ICON_EYE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const ICON_EYE_OFF = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 20 20 4"/></svg>';
   const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>';
   const ICON_PAUSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5.5" width="4" height="13" rx="1"/><rect x="13.5" y="5.5" width="4" height="13" rx="1"/></svg>';
 
@@ -819,6 +871,7 @@
       el.innerHTML = `
         <div class="name"><span class="led"></span><strong></strong><span class="range"></span></div>
         <span class="now">—</span>
+        <button class="v" aria-pressed="false"></button>
         <button class="m" aria-pressed="false">M</button>
         <button class="s" aria-pressed="false">S</button>
         <input type="range" min="-30" max="6" step="1" value="0">`;
@@ -831,11 +884,13 @@
       el.querySelector("input").setAttribute("aria-label", `Volume de ${v.name}`);
       el.querySelector(".s").onclick = () => toggleSolo(i);
       el.querySelector(".m").onclick = () => { state.voices[i].mute = !state.voices[i].mute; applyMixer(); };
+      el.querySelector(".v").onclick = () => toggleHidden(v.id);
       el.querySelector("input").oninput = (e) => { state.voices[i].volume = Number(e.target.value); applyMixer(); };
       state.voices[i].el = el;
       box.appendChild(el);
     });
     applyMixer();
+    renderHiddenButtons();
   }
 
   // ------------------------------------------------------------------ renaming / reordering voices
@@ -930,7 +985,8 @@
     state.analysis.voices = edited.map((e) => ({ ...e.info, name: e.name }));
     state.voices = edited.map((e) => e.voice);
     renderVoices(state.analysis);
-    if (state.layout === "separate") await reloadScoreXml(); // the separated staves carry the voice names
+    // Separated staves (separate layout, or next to a hidden voice) carry the voice names.
+    if (state.layout === "separate" || state.hidden.size) await reloadScoreXml();
   }
 
   function toggleSolo(i) {
@@ -1152,17 +1208,24 @@
     const lines = new Map();
     const rowY = new Map(); // `${system}|${part}|${staff}|${verse}` -> label top (units)
     const entries = [];
+    const topSplit = new Map(); // original `${part}|${staff}` -> top drawn voice number
+    for (const inst of osmd.Sheet.Instruments) {
+      const sp = sourcePart(inst.IdString);
+      const k = sp && `${sp.part}|${sp.staff}`;
+      if (sp && !(topSplit.get(k) <= sp.voice)) topSplit.set(k, sp.voice);
+    }
     osmd.GraphicSheet.MeasureList.forEach((staves, mi) => {
       staves.forEach((gm) => {
         if (!gm) return;
         const staffObj = gm.ParentStaff;
         let part = staffObj.ParentInstrument.IdString;
         let staff = String(staffObj.ParentInstrument.Staves.indexOf(staffObj) + 1);
-        // Separated staves: a lyric edit addresses the original (part, staff); its syllables are
-        // drawn on the top voice's staff (app/layout.py), so only that one offers slots.
-        const split = state.layout === "separate" ? sourcePart(part) : null;
+        // Separated staves (separate layout, or a staff with hidden voices): a lyric edit
+        // addresses the original (part, staff); its syllables are drawn on the top drawn voice's
+        // staff (app/layout.py), so only that one offers slots.
+        const split = sourcePart(part);
         if (split) {
-          if (split.voice !== 1) return;
+          if (split.voice !== topSplit.get(`${split.part}|${split.staff}`)) return;
           ({ part, staff } = split);
         }
         const system = gm.ParentMusicSystem ? gm.ParentMusicSystem.Id : 0;
@@ -1324,10 +1387,14 @@
   }
 
   /** Re-renders the score after a lyric change, keeping the scroll and playback cursor. */
+  let reloadSeq = 0;
+
   async function reloadScoreXml() {
     const stage = $("stage");
     const top = stage.scrollTop;
-    const xml = await fetch(scoreXmlUrl(state.id, state.layout), { cache: "no-store" }).then((r) => r.text());
+    const seq = ++reloadSeq;
+    const xml = await fetch(scoreXmlUrl(state.id, state.layout, state.hidden), { cache: "no-store" }).then((r) => r.text());
+    if (seq !== reloadSeq) return; // a newer reload (e.g. another voice hidden meanwhile) wins
     await state.osmd.load(xml);
     state.osmd.Sheet.Transpose = state.transpose;
     state.osmd.render();

@@ -170,3 +170,12 @@ def test_separate_staves_layout(client):
     assert r.status_code == 200 and b'<part id="P1__s1v2">' in r.content
     client.put(f"/api/scores/{sid}/voices", json={"voices": [{"id": "v1", "name": ""}, {"id": "v2", "name": "Alto"}]})
     assert b"<part-name>Alto</part-name>" in client.get(f"/api/scores/{sid}/musicxml?layout=separate").content
+
+
+def test_hidden_voices_are_left_out_of_the_drawing(client):
+    treble = m(1, n("E", 5, 2) + n("C", 5, 2, chord=True) + n("D", 5, 2) + n("B", 4, 2, chord=True))
+    sid = client.post("/api/scores", files={"file": ("h.musicxml", score(treble))}).json()["id"]
+    wait_done(client, sid)
+    r = client.get(f"/api/scores/{sid}/musicxml?hide=v1")
+    assert r.status_code == 200 and b'<part id="P1__s1v2">' in r.content and b"P1__s1v1" not in r.content
+    assert b"P1__s1v" not in client.get(f"/api/scores/{sid}/musicxml?hide=bogus").content

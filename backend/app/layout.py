@@ -304,7 +304,9 @@ def _attributes_for_staff(attrs: ET.Element, staff: str) -> ET.Element:
     return attrs
 
 
-def _separate_part(part: ET.Element, group: dict, v: int, first: bool, metas, common: int, lyrics, owner) -> ET.Element:
+def _separate_part(part: ET.Element, group: dict, v: int, first: bool, staff_first: bool, metas, common: int, lyrics, owner) -> ET.Element:
+    """One voice of a part's staff as a part of its own. `first`: the first new part made from
+    this part (gets its unnumbered directions); `staff_first`: the first drawn voice of its staff."""
     staff = group["staff"]
     plan = group["plans"][v]
     out = ET.Element("part", id=split_part_id(part.get("id"), staff, v + 1))
@@ -332,7 +334,7 @@ def _separate_part(part: ET.Element, group: dict, v: int, first: bool, metas, co
                     el.find("divisions").text = str(common)
             elif el.tag in _ONCE:
                 own = el.findtext("staff")
-                if v != 0 or (own.strip() != staff if own else not first):
+                if not staff_first or (own.strip() != staff if own else not first):
                     continue
                 el = copy.deepcopy(el)
                 if el.find("staff") is not None:
@@ -378,12 +380,21 @@ def _separate_part(part: ET.Element, group: dict, v: int, first: bool, metas, co
     return out
 
 
-def separate_staves(data: bytes, names: list[str] | None = None) -> bytes:
-    """MusicXML with each voice of a shared staff on its own staff (unchanged if there are none).
-    `names`: one per analysis voice (in analysis order), e.g. the user's names; default: detected."""
+def separate_staves(data: bytes, names: list[str] | None = None, hidden: set[int] = frozenset(), split_all: bool = True) -> bytes:
+    """MusicXML with each voice of a shared staff on its own staff (unchanged if there is nothing to do).
+
+    `names`: one per analysis voice (in analysis order), e.g. the user's names; default: detected.
+    `hidden`: analysis voice indexes left out of the drawing. Parts whose voices are all hidden are
+    removed; a staff where only some are hidden is split, so the others can be drawn alone.
+    `split_all=False` splits only those staves (the drawing otherwise keeps the stored staves).
+    Hiding every voice is ignored (an empty score cannot be drawn)."""
     root = _parse_root(data)
     sep = separate(root)
-    if not any(g["count"] > 1 for g in sep.groups):
+    total = sum(len(g["voices"]) for g in sep.groups)
+    hidden = {i for i in hidden if 0 <= i < total}
+    if len(hidden) == total:
+        hidden = set()
+    if not hidden and not (split_all and any(g["count"] > 1 for g in sep.groups)):
         return data
     names = [(names[i] if names and i < len(names) and names[i] else n) for i, n in enumerate(sep.names)]
     part_list = root.find("part-list")
@@ -393,23 +404,33 @@ def separate_staves(data: bytes, names: list[str] | None = None) -> bytes:
     by_part: dict[str, list[dict]] = {}
     for g in sep.groups:
         g["names"] = names[vi : vi + len(g["voices"])]
+        g["shown"] = [v for v in range(len(g["voices"])) if vi + v not in hidden]
         vi += len(g["voices"])
         by_part.setdefault(g["part"], []).append(g)
 
     for part in root.findall("part"):
         groups = by_part.get(part.get("id"), [])
-        if not any(g["count"] > 1 for g in groups):
+        if not groups:
+            continue  # no notes at all: drawn as stored
+        sp = score_parts.get(part.get("id"))
+        if not any(g["shown"] for g in groups):
+            root.remove(part)
+            if sp is not None:
+                part_list.remove(sp)
+            continue
+        partly_hidden = any(len(g["shown"]) < len(g["voices"]) for g in groups)
+        if not partly_hidden and not (split_all and any(g["count"] > 1 for g in groups)):
             continue
         divs = _divisions_values(part)
         fractions = [mt.length for mt in metas]
         new_parts = []
         for g in groups:
             g["plans"] = [_plan_voice(line, metas) for line in g["voices"]]
-            # Lyrics of every note at an onset, drawn on the highest voice singing there.
+            # Lyrics of every note at an onset, drawn on the highest shown voice singing there.
             lyrics: dict[tuple, dict] = {}
             owner: dict[tuple, int] = {}
-            for v, plan in enumerate(g["plans"]):
-                for mi, items in plan.items():
+            for v in g["shown"]:
+                for mi, items in g["plans"][v].items():
                     for el, on, d, _ in items:
                         owner.setdefault((mi, on), v)
                         fractions += [on, d]
@@ -420,15 +441,14 @@ def separate_staves(data: bytes, names: list[str] | None = None) -> bytes:
                             lyrics.setdefault((mi, on), {}).setdefault(ly.get("number", "1"), ly)
             g["lyrics"], g["owner"] = lyrics, owner
         common = lcm(*divs, *[f.denominator for f in fractions])
-        for gi, g in enumerate(groups):
-            for v in range(len(g["voices"])):
-                new_parts.append((g, v, _separate_part(part, g, v, gi == 0, metas, common, g["lyrics"], g["owner"])))
-        # Replace the part (and its score-part) by one per voice.
+        for g in groups:
+            for v in g["shown"]:
+                new_parts.append((g, v, _separate_part(part, g, v, not new_parts, v == g["shown"][0], metas, common, g["lyrics"], g["owner"])))
+        # Replace the part (and its score-part) by one per shown voice.
         idx = list(root).index(part)
         root.remove(part)
         for k, (_, _, p) in enumerate(new_parts):
             root.insert(idx + k, p)
-        sp = score_parts.get(part.get("id"))
         if sp is not None:
             sp_idx = list(part_list).index(sp)
             part_list.remove(sp)
@@ -456,3 +476,13 @@ def separate_staves(data: bytes, names: list[str] | None = None) -> bytes:
                 part_list.insert(sp_idx + k, new_sp)
     ET.indent(root)
     return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+
+
+def draw(data: bytes, layout: str = "parts", names: list[str] | None = None, hidden: set[int] = frozenset()) -> bytes:
+    """The MusicXML to draw: `layout` ("parts" as stored, "combined", "separate") without the
+    `hidden` voices (analysis indexes)."""
+    if layout == "separate":
+        return separate_staves(data, names, hidden)
+    if hidden:
+        data = separate_staves(data, names, hidden, split_all=False)
+    return combine_staves(data) if layout == "combined" else data
