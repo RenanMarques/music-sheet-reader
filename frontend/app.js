@@ -98,6 +98,7 @@
     pollTimer: null,
     loadToken: 0,
     transpose: 0, // semitones applied to playback and to the drawn score (per score, saved locally)
+    layout: "parts", // "parts" | "combined" staves (per score, saved locally)
   };
 
   // ------------------------------------------------------------------ API
@@ -115,7 +116,7 @@
   // ------------------------------------------------------------------ views
 
   function show(view) {
-    for (const v of ["empty", "status", "error", "player"]) $(v).hidden = v !== view;
+    for (const v of ["empty", "compose", "status", "error", "player"]) $(v).hidden = v !== view;
     const loaded = view === "player";
     for (const id of ["mixer", "transport", "score-meta"]) $(id).hidden = !loaded;
   }
@@ -173,32 +174,166 @@
     }
   }
 
-  async function upload(file) {
+  // ------------------------------------------------------------------ new score (compose)
+  // Files are collected here (in the browser) and only sent when the user clicks "Processar":
+  // one file without a voice = a whole score; otherwise one file per voice, combined into one
+  // score. A voice left on "Automático" is identified by the server (printed text, pitches).
+
+  const COMPOSE_ROUTE = "nova";
+  const ACCEPTED = /\.(pdf|png|jpe?g|tiff?|bmp|gif|xml|musicxml|mxl)$/i;
+  const MAX_FILES = 12;
+  const VOICE_CHOICES = ["Soprano", "Mezzo-soprano", "Contralto", "Tenor", "Barítono", "Baixo"];
+  const OTHER = "__other";
+  const compose = { files: [] }; // {file, voice: "" | one of VOICE_CHOICES | OTHER, other: ""}
+
+  function openCompose(files) {
+    if (files && files.length) addComposeFiles(files);
+    if (location.hash.slice(1) === COMPOSE_ROUTE) showCompose();
+    else location.hash = COMPOSE_ROUTE;
+    if (NARROW.matches) setLibrary(false);
+  }
+
+  function showCompose() {
+    show("compose");
+    renderCompose();
+  }
+
+  function addComposeFiles(files) {
+    const rejected = [];
+    for (const file of files) {
+      if (!ACCEPTED.test(file.name)) { rejected.push(file.name); continue; }
+      if (compose.files.some((f) => f.file.name === file.name && f.file.size === file.size)) continue;
+      if (compose.files.length >= MAX_FILES) { rejected.push(`${file.name} (máximo de ${MAX_FILES} arquivos)`); continue; }
+      compose.files.push({ file, voice: "", other: "" });
+    }
+    composeError(rejected.length ? `Não adicionado: ${rejected.join(", ")}. Use PDF, imagem ou MusicXML.` : "");
+    if (!$("compose").hidden) renderCompose();
+  }
+
+  function composeError(msg) {
+    $("compose-error").textContent = msg;
+    $("compose-error").hidden = !msg;
+  }
+
+  function formatSize(bytes) {
+    return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function renderCompose() {
+    const list = $("compose-list");
+    list.replaceChildren(...compose.files.map((entry, i) => {
+      const li = document.createElement("li");
+      li.className = "compose-file";
+      li.innerHTML = `
+        <div class="file"><strong></strong><small></small></div>
+        <div class="voice"><select></select><input class="other" type="text" maxlength="40" placeholder="Nome da voz" hidden></div>
+        <button type="button" class="remove">✕</button>`;
+      li.querySelector("strong").textContent = entry.file.name;
+      li.querySelector("strong").title = entry.file.name;
+      li.querySelector("small").textContent = formatSize(entry.file.size);
+      const select = li.querySelector("select");
+      select.setAttribute("aria-label", `Voz de ${entry.file.name}`);
+      for (const [value, label] of [["", "Automático"], ...VOICE_CHOICES.map((v) => [v, v]), [OTHER, "Outra…"]]) {
+        select.add(new Option(label, value, false, value === entry.voice));
+      }
+      const other = li.querySelector("input");
+      other.value = entry.other;
+      other.setAttribute("aria-label", `Nome da voz de ${entry.file.name}`);
+      const sync = () => {
+        select.classList.toggle("auto", !entry.voice);
+        other.hidden = entry.voice !== OTHER;
+      };
+      sync();
+      select.onchange = () => {
+        entry.voice = select.value;
+        sync();
+        if (entry.voice === OTHER) other.focus();
+        renderComposeNote();
+      };
+      other.oninput = () => { entry.other = other.value; };
+      const remove = li.querySelector(".remove");
+      remove.title = `Remover ${entry.file.name}`;
+      remove.setAttribute("aria-label", remove.title);
+      remove.onclick = () => {
+        compose.files.splice(i, 1);
+        renderCompose();
+        (list.querySelectorAll(".remove")[Math.min(i, compose.files.length - 1)] || $("compose-drop")).focus();
+      };
+      return li;
+    }));
+    renderComposeNote();
+  }
+
+  function renderComposeNote() {
+    const n = compose.files.length;
+    const note = $("compose-note");
+    if (n === 0) note.textContent = "";
+    else if (n === 1 && !compose.files[0].voice) {
+      note.textContent = "Um arquivo: as vozes são separadas a partir das pautas. Escolha uma voz só se o arquivo tiver uma voz apenas.";
+    } else {
+      note.textContent = `${n === 1 ? "Um arquivo com uma voz" : `${n} arquivos, um por voz`}: viram uma só partitura, com as vozes ` +
+        "da mais aguda para a mais grave. As que ficarem em Automático são identificadas pelo nome impresso na " +
+        "partitura ou comparando as alturas; dá para renomear e reordenar depois, no painel de vozes.";
+    }
+    $("compose-submit").disabled = n === 0;
+  }
+
+  async function submitCompose() {
+    const entries = compose.files;
+    if (!entries.length) return;
+    const missing = entries.find((e) => e.voice === OTHER && !e.other.trim());
+    if (missing) { composeError(`Dê um nome à voz de ${missing.file.name} ou escolha outra opção.`); return; }
     const fd = new FormData();
-    fd.append("file", file);
-    show("status");
-    $("status-title").textContent = `Enviando ${file.name}…`;
-    $("status-text").textContent = "";
+    const single = entries.length === 1 && !entries[0].voice;
+    for (const e of entries) {
+      fd.append(single ? "file" : "files", e.file);
+      if (!single) fd.append("voices", e.voice === OTHER ? e.other.trim() : e.voice);
+    }
+    const title = $("compose-title").value.trim();
+    if (title) fd.append("title", title);
+    const btn = $("compose-submit");
+    btn.disabled = true;
+    btn.textContent = "Enviando…";
+    composeError("");
     try {
       const meta = await api("/api/scores", { method: "POST", body: fd });
+      compose.files = [];
+      $("compose-title").value = "";
       location.hash = meta.id;
       refreshList();
     } catch (e) {
-      showError(`Falha no envio: ${e.message}`);
+      composeError(`Falha no envio: ${e.message}`);
+    } finally {
+      btn.textContent = "Processar";
+      renderComposeNote();
     }
+  }
+
+  function cancelCompose() {
+    compose.files = [];
+    $("compose-title").value = "";
+    composeError("");
+    location.hash = "";
   }
 
   function setupDropzone() {
     const dz = $("dropzone");
-    const input = $("file-input");
-    input.onchange = () => { if (input.files[0]) upload(input.files[0]); input.value = ""; };
-    dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("over"); });
-    dz.addEventListener("dragleave", () => dz.classList.remove("over"));
-    dz.addEventListener("drop", (e) => {
-      e.preventDefault();
-      dz.classList.remove("over");
-      if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
-    });
+    dz.onclick = () => openCompose();
+    $("btn-empty-new").onclick = () => openCompose();
+    const drop = $("compose-drop");
+    const input = $("compose-input");
+    input.onchange = () => { addComposeFiles(input.files); input.value = ""; };
+    for (const [zone, onFiles] of [[dz, openCompose], [drop, addComposeFiles]]) {
+      zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
+      zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+      zone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        zone.classList.remove("over");
+        onFiles(e.dataTransfer.files);
+      });
+    }
+    $("compose-submit").onclick = submitCompose;
+    $("compose-cancel").onclick = cancelCompose;
   }
 
   // ------------------------------------------------------------------ opening a score
@@ -209,8 +344,9 @@
     if (state.editing) setEditing(false);
     stop();
     disposeAudio();
-    state.id = id || null;
+    state.id = id && id !== COMPOSE_ROUTE ? id : null;
     refreshList();
+    if (id === COMPOSE_ROUTE) { showCompose(); return; }
     if (!id) { show("empty"); return; }
 
     let meta;
@@ -234,13 +370,16 @@
     $("status-title").textContent = meta.filename;
     $("status-text").textContent = "Carregando…";
     try {
+      const layout = meta.combinable ? loadLayout(id) : "parts";
       const [analysis, xml] = await Promise.all([
         api(`/api/scores/${id}/analysis`),
-        fetch(`/api/scores/${id}/musicxml`, { cache: "no-cache" }).then((r) => r.text()),
+        fetch(scoreXmlUrl(id, layout), { cache: "no-cache" }).then((r) => r.text()),
       ]);
       if (token !== state.loadToken) return;
       state.analysis = analysis;
       state.meta = meta;
+      state.layout = layout;
+      renderLayoutButton();
       state.transpose = loadTranspose(id);
       setEditing(false);
       renderHeader(meta, analysis);
@@ -258,7 +397,7 @@
     $("score-title").textContent = a.title;
     renderScoreInfo(a);
     renderKeyControl();
-    $("link-source").href = `/api/scores/${meta.id}/source`;
+    renderSources(meta);
     $("link-xml").href = `/api/scores/${meta.id}/musicxml`;
     transport.bpm.value = a.tempo; // before updatePosition(): the total time depends on it
     $("tempo").value = Math.round(a.tempo);
@@ -267,6 +406,47 @@
     $("seek").value = 0;
     requestAnimationFrame(() => renderSeekTicks(a));
     updatePosition(0);
+  }
+
+  const HOW = {
+    "escolhida": "escolhida no envio",
+    "texto da partitura": "lida no texto da partitura",
+    "alturas": "identificada comparando as alturas",
+  };
+
+  /** "Ver original", or one link per uploaded file for a score combined from one file per voice,
+   *  plus how its voices were identified and what was patched (octaves, missing measures). */
+  function renderSources(meta) {
+    const parts = meta.sources || [];
+    $("link-source").hidden = parts.length > 1;
+    $("link-source").href = `/api/scores/${meta.id}/source`;
+    const box = $("source-parts");
+    box.hidden = parts.length <= 1;
+    box.replaceChildren("Originais:");
+    const voicesOf = (p) => p.voices || (p.name ? [{ name: p.name, abbr: p.abbr }] : []);
+    const notes = [];
+    parts.forEach((p, i) => {
+      const a = document.createElement("a");
+      a.href = `/api/scores/${meta.id}/source?part=${i}`;
+      a.target = "_blank";
+      a.rel = "noopener";
+      const vs = voicesOf(p);
+      a.textContent = vs.map((v) => v.abbr || v.name).join("/") || String(i + 1);
+      a.title = p.filename;
+      box.append(" ", a);
+      for (const v of vs) if (v.how) notes.push(`${v.name}: ${HOW[v.how] || v.how} (${p.filename})`);
+    });
+    const warnings = meta.warnings || [];
+    const box2 = $("merge-notes");
+    box2.hidden = !notes.length && !warnings.length;
+    box2.querySelector("summary").textContent = warnings.length
+      ? `Como as vozes foram identificadas (e ${warnings.length} ${warnings.length === 1 ? "ajuste" : "ajustes"} na leitura)`
+      : "Como as vozes foram identificadas";
+    box2.querySelector("ul").replaceChildren(...[...notes, ...warnings].map((w) => {
+      const li = document.createElement("li");
+      li.textContent = w;
+      return li;
+    }));
   }
 
   function renderScoreInfo(a) {
@@ -303,6 +483,36 @@
 
   const TRANSPOSE_LIMIT = 12; // semitones, each way
   const SELECT_RANGE = 6; // the key list offers −6…+6
+
+  // ------------------------------------------------------------------ staff layout
+  // "parts": one staff per voice part, as stored. "combined": same-clef neighbouring voices
+  // (S+C, T+B) share a staff, drawn by the backend (app/layout.py). Drawing only: playback,
+  // the mixer and the stored MusicXML don't change. Saved per score.
+
+  function loadLayout(id) {
+    try { return localStorage.getItem(`layout:${id}`) === "combined" ? "combined" : "parts"; } catch (_) { return "parts"; }
+  }
+
+  function scoreXmlUrl(id, layout) {
+    return `/api/scores/${id}/musicxml` + (layout === "combined" ? "?layout=combined" : "");
+  }
+
+  function renderLayoutButton() {
+    const btn = $("btn-layout");
+    btn.hidden = !(state.meta && state.meta.combinable);
+    const combined = state.layout === "combined";
+    btn.setAttribute("aria-pressed", String(combined));
+    btn.textContent = combined ? "Pautas juntas" : "Juntar pautas";
+  }
+
+  async function toggleLayout() {
+    if (!state.osmd || !state.id) return;
+    state.layout = state.layout === "combined" ? "parts" : "combined";
+    try { localStorage.setItem(`layout:${state.id}`, state.layout); } catch (_) { /* private mode */ }
+    renderLayoutButton();
+    closeLyricEditor();
+    await reloadScoreXml();
+  }
 
   function loadTranspose(id) {
     try { return Math.max(-TRANSPOSE_LIMIT, Math.min(TRANSPOSE_LIMIT, Number(localStorage.getItem(`transpose:${id}`)) || 0)); }
@@ -497,14 +707,14 @@
     disposeAudio();
     transport.bpm.value = a.tempo;
     const timbre = $("timbre").value;
-    a.voices.forEach((v, i) => {
+    a.voices.forEach((v) => {
       const channel = new Tone.Channel({ volume: 0 }).toDestination();
       const voice = { channel, synth: makeSynth(timbre).connect(channel), mute: false, solo: false, volume: 0, el: null };
       voice.part = new Tone.Part((time, n) => {
         const dur = Math.max(0.05, Tone.Ticks(n.dt).toSeconds() * 0.94);
         const midi = n.midi + state.transpose;
         voice.synth.triggerAttackRelease(Tone.Frequency(midi, "midi").toFrequency(), dur, time);
-        Tone.getDraw().schedule(() => showNote(i, midi), time);
+        Tone.getDraw().schedule(() => showNote(voice, midi), time);
       }, v.notes.map((n) => ({ time: `${Math.round(n.t * PPQ)}i`, dt: Math.round(n.d * PPQ), midi: n.midi })));
       voice.part.start(0);
       state.voices.push(voice);
@@ -567,7 +777,7 @@
     releaseAll();
     updatePlayButton(false);
     if (state.analysis) updatePosition(0);
-    for (let i = 0; i < state.voices.length; i++) showNote(i, null);
+    for (const v of state.voices) showNote(v, null);
   }
 
   const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>';
@@ -584,6 +794,7 @@
   // ------------------------------------------------------------------ mixer
 
   function renderVoices(a) {
+    endVoiceEdit();
     const box = $("voices");
     box.innerHTML = "";
     $("voices-title").textContent = `Vozes (${a.voices.length})`;
@@ -601,6 +812,7 @@
       el.querySelector(".range").textContent = voiceRange(v);
       el.querySelector(".m").title = `Silenciar ${v.name}`;
       el.querySelector(".s").title = `Tocar só ${v.name} (combine várias com S)${i < 9 ? ` · tecla ${i + 1}` : ""}`;
+      el.querySelector("input").value = String(state.voices[i].volume);
       el.querySelector("input").title = `Volume de ${v.name}`;
       el.querySelector("input").setAttribute("aria-label", `Volume de ${v.name}`);
       el.querySelector(".s").onclick = () => toggleSolo(i);
@@ -610,6 +822,100 @@
       box.appendChild(el);
     });
     applyMixer();
+  }
+
+  // ------------------------------------------------------------------ renaming / reordering voices
+  // Metadata only (PUT /voices): the score and the audio stay as they are. Reordering moves the
+  // voice objects (channel, synth, mixer state) together with their analysis entries.
+
+  let voiceEdit = null; // [{voice, info, name}] while editing
+
+  function startVoiceEdit() {
+    if (!state.analysis) return;
+    voiceEdit = state.analysis.voices.map((info, i) => ({ voice: state.voices[i], info, name: info.name }));
+    for (const id of ["btn-edit-voices", "btn-all"]) $(id).hidden = true;
+    for (const id of ["btn-voices-cancel", "btn-voices-save"]) $(id).hidden = false;
+    renderVoiceEditor();
+    const first = $("voices").querySelector("input");
+    if (first) first.focus();
+  }
+
+  function endVoiceEdit() {
+    voiceEdit = null;
+    for (const id of ["btn-edit-voices", "btn-all"]) $(id).hidden = false;
+    for (const id of ["btn-voices-cancel", "btn-voices-save"]) $(id).hidden = true;
+  }
+
+  function renderVoiceEditor(focus) {
+    const box = $("voices");
+    box.replaceChildren(...voiceEdit.map((e, i) => {
+      const el = document.createElement("div");
+      el.className = "track edit";
+      el.style.setProperty("--c", COLORS[i % COLORS.length]);
+      el.innerHTML = `
+        <input class="vname" type="text" maxlength="40">
+        <button class="up">▲</button>
+        <button class="down">▼</button>
+        <small class="auto" hidden></small>`;
+      const input = el.querySelector("input");
+      input.value = e.name;
+      input.setAttribute("aria-label", `Nome da voz ${i + 1}`);
+      input.placeholder = e.info.auto_name || "";
+      const auto = el.querySelector(".auto");
+      const syncAuto = () => {
+        const changed = e.info.auto_name && e.name.trim() && e.name.trim() !== e.info.auto_name;
+        auto.hidden = !changed;
+        auto.textContent = changed ? `Identificada como ${e.info.auto_name}` : "";
+      };
+      syncAuto();
+      input.oninput = () => { e.name = input.value; syncAuto(); };
+      input.onkeydown = (ev) => {
+        if (ev.key === "Enter") { ev.preventDefault(); saveVoiceEdit(); }
+        if (ev.key === "Escape") { ev.preventDefault(); renderVoices(state.analysis); }
+      };
+      const move = (delta, cls) => {
+        const j = i + delta;
+        [voiceEdit[i], voiceEdit[j]] = [voiceEdit[j], voiceEdit[i]];
+        renderVoiceEditor({ index: j, cls });
+      };
+      const up = el.querySelector(".up");
+      const down = el.querySelector(".down");
+      up.disabled = i === 0;
+      down.disabled = i === voiceEdit.length - 1;
+      up.title = `Subir ${e.name || e.info.auto_name}`;
+      down.title = `Descer ${e.name || e.info.auto_name}`;
+      up.setAttribute("aria-label", up.title);
+      down.setAttribute("aria-label", down.title);
+      up.onclick = () => move(-1, ".up");
+      down.onclick = () => move(1, ".down");
+      return el;
+    }));
+    if (focus) {
+      const row = box.children[focus.index];
+      const btn = row && row.querySelector(focus.cls);
+      (btn && !btn.disabled ? btn : row && row.querySelector("input")).focus();
+    }
+  }
+
+  async function saveVoiceEdit() {
+    if (!voiceEdit) return;
+    const edited = voiceEdit.map((e) => ({ ...e, name: e.name.trim() || e.info.auto_name || e.info.name }));
+    const body = { voices: edited.map((e) => ({ id: e.info.id, name: e.name === e.info.auto_name ? "" : e.name })) };
+    const btn = $("btn-voices-save");
+    btn.disabled = true;
+    try {
+      await api(`/api/scores/${state.id}/voices`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+    } catch (err) {
+      $("voices-title").textContent = `Não foi possível salvar: ${err.message}`;
+      return;
+    } finally {
+      btn.disabled = false;
+    }
+    state.analysis.voices = edited.map((e) => ({ ...e.info, name: e.name }));
+    state.voices = edited.map((e) => e.voice);
+    renderVoices(state.analysis);
   }
 
   function toggleSolo(i) {
@@ -640,8 +946,9 @@
     }
   }
 
-  function showNote(i, midi) {
-    const v = state.voices[i];
+  /** Shows the note a voice is playing in its mixer row (`v` is the voice object, so the
+   *  indicator follows the voice when the mixer is reordered). */
+  function showNote(v, midi) {
     if (!v || !v.el) return;
     const now = v.el.querySelector(".now");
     now.textContent = midi == null ? "—" : noteName(midi);
@@ -709,7 +1016,7 @@
         const secs = Tone.Ticks(Math.round(left * PPQ)).toSeconds() * 0.94;
         const midi = n.midi + state.transpose;
         voice.synth.triggerAttackRelease(Tone.Frequency(midi, "midi").toFrequency(), Math.max(0.05, secs), when);
-        Tone.getDraw().schedule(() => showNote(i, midi), when);
+        Tone.getDraw().schedule(() => showNote(voice, midi), when);
       }
     });
   }
@@ -838,7 +1145,10 @@
         const staff = String(staffObj.ParentInstrument.Staves.indexOf(staffObj) + 1);
         const system = gm.ParentMusicSystem ? gm.ParentMusicSystem.Id : 0;
         for (const se of gm.staffEntries || []) {
-          const sounding = se.sourceStaffEntry.VoiceEntries.some((ve) => ve.Notes.some((n) => !n.isRest()));
+          // On a combined staff only the top voice (voice 1) carries lyrics: its notes are the
+          // ones a lyric edit addresses in the stored score (same part id, see app/layout.py).
+          const sounding = se.sourceStaffEntry.VoiceEntries.some((ve) =>
+            (state.layout !== "combined" || ve.ParentVoice.VoiceId === 1) && ve.Notes.some((n) => !n.isRest()));
           const lyrics = {};
           for (const gle of se.LyricsEntries || []) {
             const le = gle.LyricsEntry;
@@ -995,7 +1305,7 @@
   async function reloadScoreXml() {
     const stage = $("stage");
     const top = stage.scrollTop;
-    const xml = await fetch(`/api/scores/${state.id}/musicxml`, { cache: "no-store" }).then((r) => r.text());
+    const xml = await fetch(scoreXmlUrl(state.id, state.layout), { cache: "no-store" }).then((r) => r.text());
     await state.osmd.load(xml);
     state.osmd.Sheet.Transpose = state.transpose;
     state.osmd.render();
@@ -1025,6 +1335,7 @@
 
   function setupLyricEditing() {
     $("btn-edit-lyrics").onclick = () => setEditing(!state.editing);
+    $("btn-layout").onclick = toggleLayout;
     $("btn-done-lyrics").onclick = () => setEditing(false);
     const input = $("lyric-input");
     input.addEventListener("keydown", (e) => {
@@ -1196,6 +1507,9 @@
     $("timbre").onchange = changeTimbre;
     $("loop").onchange = applyLoop;
     $("btn-all").onclick = resetMixer;
+    $("btn-edit-voices").onclick = startVoiceEdit;
+    $("btn-voices-save").onclick = saveVoiceEdit;
+    $("btn-voices-cancel").onclick = () => renderVoices(state.analysis);
     $("btn-follow").onclick = () => setFollow(!settings.follow);
     $("btn-key-down").onclick = () => setTranspose(state.transpose - 1);
     $("btn-key-up").onclick = () => setTranspose(state.transpose + 1);

@@ -15,18 +15,20 @@
         <strong id="score-title"></strong>
         <span id="score-info" class="muted"></span>
         <a id="link-source" target="_blank" rel="noopener">Ver original</a>
+        <span id="source-parts" class="source-parts" hidden>Originais:</span>
         <a id="link-xml">Baixar MusicXML</a>
+        <button id="btn-layout" class="ghost edit-toggle" aria-pressed="false" hidden
+          title="Mostrar as vozes de mesma clave numa só pauta (Soprano e Contralto, Tenor e Baixo) ou cada voz na sua pauta">Juntar pautas</button>
         <button id="btn-edit-lyrics" class="ghost edit-toggle" aria-pressed="false" title="Corrigir a letra clicando nas sílabas">Editar letra</button>
       </div>
     </header>
 
     <aside class="library" id="library">
-      <label class="dropzone" id="dropzone">
-        <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.xml,.musicxml,.mxl" hidden>
-        <strong>Enviar partitura</strong>
-        <span>Arraste aqui ou clique para escolher</span>
+      <button type="button" class="dropzone" id="dropzone">
+        <strong>Nova partitura</strong>
+        <span>Clique ou arraste arquivos aqui</span>
         <small>PDF, imagem ou MusicXML</small>
-      </label>
+      </button>
       <h2>Suas partituras</h2>
       <ul id="score-list" class="score-list"><li class="muted">Nenhuma ainda.</li></ul>
     </aside>
@@ -34,7 +36,32 @@
     <main class="stage" id="stage">
       <div id="empty" class="message">
         <p>Envie um PDF, imagem ou MusicXML para ouvir a partitura e isolar as vozes.</p>
+        <button type="button" class="primary" id="btn-empty-new">Nova partitura</button>
       </div>
+
+      <section id="compose" class="compose" hidden aria-labelledby="compose-heading">
+        <h2 id="compose-heading">Nova partitura</h2>
+        <p class="compose-lead">
+          Adicione a partitura inteira num arquivo, ou um arquivo para cada voz. Pode adicionar tudo
+          de uma vez ou aos poucos; nada é processado antes de você clicar em Processar.
+        </p>
+        <label class="compose-drop" id="compose-drop">
+          <input type="file" id="compose-input" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.xml,.musicxml,.mxl" multiple hidden>
+          <strong>Adicionar arquivos</strong>
+          <span>Arraste aqui ou clique para escolher (PDF, imagem ou MusicXML)</span>
+        </label>
+        <ul class="compose-list" id="compose-list" aria-label="Arquivos"></ul>
+        <p class="compose-note" id="compose-note"></p>
+        <label class="compose-title">
+          <span>Título</span>
+          <input type="text" id="compose-title" maxlength="200" placeholder="Automático">
+        </label>
+        <p class="compose-error" id="compose-error" role="alert" hidden></p>
+        <div class="compose-actions">
+          <button type="button" id="compose-cancel" class="ghost">Cancelar</button>
+          <button type="button" id="compose-submit" class="primary" disabled>Processar</button>
+        </div>
+      </section>
 
       <div id="status" class="message status" hidden>
         <div class="spinner"></div>
@@ -60,6 +87,10 @@
           O reconhecimento automático pode errar notas ou ritmos. Para corrigir, baixe o MusicXML,
           edite em um editor como o MuseScore e envie o arquivo corrigido.
         </p>
+        <details class="notice merge-notes" id="merge-notes" hidden>
+          <summary></summary>
+          <ul></ul>
+        </details>
         <div class="sheet" id="sheet">
           <div id="osmd"></div>
           <div class="measure-hover" id="measure-hover" hidden></div>
@@ -73,7 +104,12 @@
     <aside class="mixer console" id="mixer" hidden aria-label="Vozes">
       <div class="mixer-head">
         <h2 id="voices-title">Vozes</h2>
-        <button id="btn-all" class="chip" title="Tirar todos os solos e mudos">Todas</button>
+        <div class="mixer-actions">
+          <button id="btn-edit-voices" class="chip" title="Renomear e reordenar as vozes">Editar</button>
+          <button id="btn-all" class="chip" title="Tirar todos os solos e mudos">Todas</button>
+          <button id="btn-voices-cancel" class="chip" hidden>Cancelar</button>
+          <button id="btn-voices-save" class="chip primary" hidden>Concluir</button>
+        </div>
       </div>
       <div id="voices" class="tracks"></div>
       <p class="hint">S toca só as vozes marcadas; M silencia. Teclas 1–9 alternam o solo de cada voz; + e − mudam o tom em meio-tom; F liga ou desliga o acompanhamento da partitura. Clique num compasso para ir até ele; Alt+clique vai para a nota exata.</p>

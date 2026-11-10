@@ -15,12 +15,15 @@ Times are in quarter notes (Fraction while parsing, float in the output).
 from __future__ import annotations
 
 import io
+import re
 import itertools
 import zipfile
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from statistics import mean
+from statistics import mean, median
 from xml.etree import ElementTree as ET
+
+from .voices import Line, assign, clef_is_low, numbered
 
 STEP_SEMITONES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 DEFAULT_TEMPO = 90.0
@@ -389,21 +392,38 @@ def separate_voices(events: list[NoteEvent], k: int, rests: list[NoteEvent] = ()
 # --------------------------------------------------------------------------- public API
 
 
-def _voice_names(groups: list[dict], total: int) -> list[str]:
-    if total == 4:
-        return ["Soprano", "Contralto", "Tenor", "Baixo"]
+def _staff_low_clef(part: ET.Element, staff: str) -> bool | None:
+    for clef in part.iter("clef"):
+        if clef.get("number", "1") == staff:
+            try:
+                return clef_is_low(
+                    clef.findtext("sign", "").strip(), int(clef.findtext("line") or 0), int(clef.findtext("clef-octave-change") or 0)
+                )
+            except ValueError:
+                return None
+    return None
+
+
+def _meaningful(name: str) -> bool:
+    """A part name worth showing ("Soprano", "Violino"), not OMR noise ("0", "U") or a default."""
+    return len(re.findall(r"[^\W\d_]", name)) >= 2 and name.strip().lower() not in GENERIC_PART_NAMES
+
+
+def _voice_names(groups: list[dict], total: int, parts: dict[str, ET.Element]) -> list[str]:
+    """One voice: "Melodia". One voice per part with distinct, meaningful part names (e.g. a score
+    combined from per-voice sheets): the part names. Otherwise voices are identified by comparing
+    their pitches (app.voices): Soprano/Contralto/Tenor/Baixo, Soprano 1/Soprano 2, ..."""
     if total == 1:
         return ["Melodia"]
-    names = []
     part_names = [g["part_name"] for g in groups]
+    if all(g["count"] == 1 for g in groups) and len(set(part_names)) == len(part_names) and all(map(_meaningful, part_names)):
+        return part_names
+    lines = []
     for g in groups:
-        distinct = part_names.count(g["part_name"]) == 1 and g["part_name"].lower() not in GENERIC_PART_NAMES
-        for vi in range(g["count"]):
-            if distinct and g["count"] == 1:
-                names.append(g["part_name"])
-            else:
-                names.append(f"Voz {len(names) + 1}")
-    return names
+        low = _staff_low_clef(parts[g["part"]], g["staff"]) if g["part"] in parts else None
+        for line in g["voices"]:
+            lines.append(Line(median=float(median([e.midi for e in line])) if line else 60.0, low_clef=low))
+    return numbered([t.name for t in assign(lines)], [ln.median for ln in lines])
 
 
 def note_name(midi: int) -> str:
@@ -465,7 +485,7 @@ def analyze(data: bytes, title_fallback: str = "Partitura") -> dict:
             }
         )
     total = sum(g["count"] for g in groups)
-    names = _voice_names(groups, total)
+    names = _voice_names(groups, total, {p.get("id"): p for p in parts})
 
     # Expand repeats into a performance timeline.
     order = expand_repeats(metas)

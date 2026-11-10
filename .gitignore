@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 # Personal Claude Code settings (shared project settings live in .claude/settings.json)
 .claude/settings.local.json
+
+# Windows download metadata (files copied from a Windows host)
+*:Zone.Identifier

@@ -4,6 +4,8 @@ Uploads are stored under DATA_DIR/scores/<id>/:
   meta.json      job status (queued | processing | done | error)
   source.<ext>   the uploaded file
   omr/           Audiveris output (only for PDF/images)
+  For a score combined from one file per voice ("partes"): source-<n>.<ext> and omr/<n>/ per
+  file, listed in meta["sources"] in choir order (see app.merge).
   score.orig.xml MusicXML before any lyric edits (for OMR: lyrics already normalised)
   score.xml      MusicXML shown and downloaded (score.orig.xml + lyric edits)
   analysis.json  playback model from app.musicxml.analyze
@@ -22,13 +24,17 @@ from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel
 
 from .lyrics import LyricsError, apply_lyric_edits, normalize_lyrics
+from .layout import can_combine, combine_staves
+from .merge import PartFile, merge_scores
+from .sheettext import common_title, credit_lines, pdf_lines
+from .voices import voice_from_lines
 from .musicxml import MusicXMLError, analyze, read_musicxml_bytes
 from .omr import OMRError, run_audiveris
 
@@ -38,6 +44,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR", ROOT / "frontend"))
 VENDOR_DIR = Path(os.environ.get("VENDOR_DIR", ROOT / "vendor"))
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_PARTS = 12
+MAX_NAME = 40
 
 OMR_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"}
 XML_EXTS = {".xml", ".musicxml", ".mxl"}
@@ -71,29 +79,70 @@ def _write_meta(d: Path, **changes) -> dict:
     return meta
 
 
+def _read_source(d: Path, source: Path, omr_dir: Path, what: str) -> bytes:
+    """MusicXML for one uploaded file (running OMR on PDFs/images)."""
+    if source.suffix.lower() in OMR_EXTS:
+        _write_meta(d, status="processing", stage=f"Reconhecendo {what} (OMR)…")
+        return run_audiveris(source, omr_dir).read_bytes()
+    _write_meta(d, status="processing", stage=f"Lendo {what}…")
+    return read_musicxml_bytes(source.read_bytes())
+
+
+def _printed_lines(source: Path, xml: bytes) -> list[str]:
+    """Text printed on the sheet: the PDF's text layer, else the MusicXML credits."""
+    return (pdf_lines(source) if source.suffix.lower() == ".pdf" else []) or credit_lines(xml)
+
+
+def _process_parts(d: Path, meta: dict) -> tuple[bytes, str]:
+    """One file per voice: recognise each, identify the voices, combine (app.merge)."""
+    sources = meta["sources"]
+    part_files, texts = [], []
+    for i, s in enumerate(sources, 1):
+        source = d / s["file"]
+        what = f"{s.get('voice') or s['filename']} ({i}/{len(sources)})"
+        try:
+            xml = _read_source(d, source, d / "omr" / str(i), what)
+        except (OMRError, MusicXMLError) as e:
+            raise type(e)(f"{s['filename']}: {e}") from e
+        if source.suffix.lower() in OMR_EXTS:
+            xml, _stats = normalize_lyrics(xml)
+        lines = _printed_lines(source, xml)
+        texts.append(lines)
+        part_files.append(PartFile(xml=xml, label=s["filename"], voice=s.get("voice"), printed_voice=voice_from_lines(lines)))
+    title = meta.get("user_title") or common_title(texts) or Path(sources[0]["filename"]).stem
+    _write_meta(d, stage="Identificando e juntando as vozes…")
+    result = merge_scores(part_files, title)
+    _store_score(d, result.xml, normalize=False)
+    # Sources in score order, each with the voice(s) found in it.
+    for s in sources:
+        s["voices"] = [{"name": v.name, "abbr": v.abbr, "how": v.how} for v in result.voices if sources[v.file] is s]
+    first = {id(sources[v.file]): k for k, v in reversed(list(enumerate(result.voices)))}
+    sources = sorted(sources, key=lambda s: first.get(id(s), len(sources)))
+    _write_meta(d, sources=sources, warnings=result.warnings)
+    return result.xml, title
+
+
 def process(d: Path) -> None:
     meta = _read_meta(d)
-    source = d / meta["source"]
-    title = Path(meta["filename"]).stem
     try:
-        if source.suffix.lower() in OMR_EXTS:
-            _write_meta(d, status="processing", stage="Reconhecendo a partitura (OMR)…")
-            xml_path = run_audiveris(source, d / "omr")
-            xml = xml_path.read_bytes()
+        if meta.get("sources"):
+            xml, title = _process_parts(d, meta)
         else:
-            _write_meta(d, status="processing", stage="Lendo MusicXML…")
-            xml = read_musicxml_bytes(source.read_bytes())
-        is_omr = source.suffix.lower() in OMR_EXTS
-        _store_score(d, xml, normalize=is_omr)
+            source = d / meta["source"]
+            xml = _read_source(d, source, d / "omr", "a partitura")
+            _store_score(d, xml, normalize=source.suffix.lower() in OMR_EXTS)
+            # OCR'd titles are unreliable (Audiveris picks an arbitrary text line): use the filename.
+            title = meta.get("user_title") or (Path(meta["filename"]).stem if source.suffix.lower() in OMR_EXTS else None)
         _write_meta(d, stage="Separando vozes…")
-        result = analyze(xml, title_fallback=title)
+        result = analyze(xml, title_fallback=Path(meta["filename"]).stem)
         if not result["voices"]:
             raise MusicXMLError("Nenhuma nota reconhecida na partitura")
-        if source.suffix.lower() in OMR_EXTS:
-            # OCR'd titles are unreliable (Audiveris picks an arbitrary text line): use the filename.
+        if title:
             result["title"] = title
         (d / "analysis.json").write_text(json.dumps(result, ensure_ascii=False))
-        _write_meta(d, status="done", stage=None, title=result["title"], voices=len(result["voices"]))
+        _write_meta(
+            d, status="done", stage=None, title=result["title"], voices=len(result["voices"]), combinable=can_combine(xml)
+        )
     except (OMRError, MusicXMLError) as e:
         _write_meta(d, status="error", stage=None, error=str(e))
     except Exception as e:  # noqa: BLE001 - report anything to the UI
@@ -122,6 +171,12 @@ def resume_pending() -> None:
                 _store_score(d, (d / "score.xml").read_bytes(), normalize=Path(meta["source"]).suffix.lower() in OMR_EXTS)
             except LyricsError:
                 traceback.print_exc()
+        # Scores processed before the combined-staves layout existed.
+        if meta.get("status") == "done" and "combinable" not in meta and (d / "score.xml").exists():
+            try:
+                _write_meta(d, combinable=can_combine((d / "score.xml").read_bytes()))
+            except MusicXMLError:
+                traceback.print_exc()
         if meta.get("status") in ("queued", "processing"):
             _write_meta(meta_file.parent, status="queued", stage="Na fila…")
             executor.submit(process, meta_file.parent)
@@ -145,24 +200,62 @@ async def revalidate_by_default(request, call_next):
     return response
 
 
-@app.post("/api/scores", status_code=202)
-async def upload(file: UploadFile) -> dict:
+async def _read_upload(file: UploadFile) -> tuple[str, bytes]:
     filename = Path(file.filename or "partitura").name
-    ext = Path(filename).suffix.lower()
-    if ext not in OMR_EXTS | XML_EXTS:
-        raise HTTPException(400, "Formato não suportado. Envie PDF, imagem (PNG/JPG/TIFF) ou MusicXML (.xml/.musicxml/.mxl).")
+    if Path(filename).suffix.lower() not in OMR_EXTS | XML_EXTS:
+        raise HTTPException(
+            400, f"{filename}: formato não suportado. Envie PDF, imagem (PNG/JPG/TIFF) ou MusicXML (.xml/.musicxml/.mxl)."
+        )
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Arquivo maior que 50 MB")
+        raise HTTPException(413, f"{filename}: arquivo maior que 50 MB")
     if not data:
-        raise HTTPException(400, "Arquivo vazio")
+        raise HTTPException(400, f"{filename}: arquivo vazio")
+    return filename, data
+
+
+@app.post("/api/scores", status_code=202)
+async def upload(
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
+    voices: list[str] = Form([]),
+    title: str = Form(""),
+) -> dict:
+    """Upload a score.
+
+    - One file, no voice: one score (its voices are separated from the staves, app.musicxml).
+    - Several files, or a file with a voice: one file per voice of the same piece, combined into
+      one score (app.merge). `voices[i]` is the voice of `files[i]`: a voice type ("Soprano"),
+      any name ("Solista"), or "" to identify it automatically.
+    - `title` (optional) overrides the automatic title.
+    """
+    uploads = [file] if file else list(files or [])
+    if not uploads:
+        raise HTTPException(400, "Nenhum arquivo enviado")
+    if len(uploads) > MAX_PARTS:
+        raise HTTPException(400, f"Envie no máximo {MAX_PARTS} partes")
+    if voices and len(voices) != len(uploads):
+        raise HTTPException(400, "Informe uma voz por arquivo (vazia = automática)")
+    voices = [v.strip()[:MAX_NAME] for v in voices] or [""] * len(uploads)
+    received = [await _read_upload(u) for u in uploads]
     score_id = uuid.uuid4().hex[:12]
     d = SCORES_DIR / score_id
     d.mkdir(parents=True)
-    (d / f"source{ext}").write_bytes(data)
-    meta = _write_meta(
-        d, id=score_id, filename=filename, source=f"source{ext}", status="queued", stage="Na fila…", created=time.time()
-    )
+    fields: dict = {"user_title": title.strip()[:200] or None}
+    if len(received) == 1 and not voices[0]:
+        filename, data = received[0]
+        ext = Path(filename).suffix.lower()
+        (d / f"source{ext}").write_bytes(data)
+        fields |= {"filename": filename, "source": f"source{ext}"}
+    else:
+        sources = []
+        for i, ((filename, data), voice) in enumerate(zip(received, voices), 1):
+            name = f"source-{i}{Path(filename).suffix.lower()}"
+            (d / name).write_bytes(data)
+            sources.append({"file": name, "filename": filename, "voice": voice or None})
+        label = fields["user_title"] or (received[0][0] if len(received) == 1 else f"{len(received)} partes")
+        fields |= {"filename": label, "source": sources[0]["file"], "sources": sources}
+    meta = _write_meta(d, id=score_id, **fields, status="queued", stage="Na fila…", created=time.time())
     executor.submit(process, d)
     return meta
 
@@ -189,19 +282,66 @@ def delete_score(score_id: str) -> Response:
 
 @app.get("/api/scores/{score_id}/analysis")
 def get_analysis(score_id: str) -> JSONResponse:
-    f = _dir(score_id) / "analysis.json"
+    d = _dir(score_id)
+    f = d / "analysis.json"
     if not f.exists():
         raise HTTPException(409, "Partitura ainda não processada")
-    return JSONResponse(json.loads(f.read_text()))
+    return JSONResponse(_apply_voice_layout(json.loads(f.read_text()), _read_meta(d).get("voice_layout")))
+
+
+def _apply_voice_layout(analysis: dict, layout: list[dict] | None) -> dict:
+    """The user's voice names and mixer order (meta["voice_layout"]) over the analysis.
+    Each voice keeps its detected name as `auto_name`."""
+    for v in analysis["voices"]:
+        v["auto_name"] = v["name"]
+    if not layout:
+        return analysis
+    by_id = {v["id"]: v for v in analysis["voices"]}
+    ordered = []
+    for item in layout:
+        v = by_id.pop(item.get("id"), None)
+        if v is not None:
+            v["name"] = item.get("name") or v["name"]
+            ordered.append(v)
+    analysis["voices"] = ordered + list(by_id.values())
+    return analysis
+
+
+class VoiceItem(BaseModel):
+    id: str
+    name: str = ""
+
+
+class VoiceLayout(BaseModel):
+    voices: list[VoiceItem]  # mixer order; empty name = detected name; empty list = reset
+
+
+@app.put("/api/scores/{score_id}/voices")
+def set_voice_layout(score_id: str, body: VoiceLayout) -> dict:
+    """Rename and reorder the voices (metadata only: the score and its analysis are unchanged)."""
+    d = _dir(score_id)
+    _require_done(d)
+    ids = {v["id"] for v in json.loads((d / "analysis.json").read_text())["voices"]}
+    layout = [{"id": v.id, "name": v.name.strip()[:MAX_NAME]} for v in body.voices]
+    if any(v["id"] not in ids for v in layout) or len({v["id"] for v in layout}) != len(layout):
+        raise HTTPException(400, "Vozes inválidas")
+    return _write_meta(d, voice_layout=layout or None)
 
 
 @app.get("/api/scores/{score_id}/musicxml")
-def get_musicxml(score_id: str) -> FileResponse:
+def get_musicxml(score_id: str, layout: str = "parts") -> Response:
+    """The score as stored (one part per voice), or with `layout=combined` the drawing layout with
+    same-clef voices sharing a staff (see app.layout)."""
     d = _dir(score_id)
     f = d / "score.xml"
     if not f.exists():
         raise HTTPException(409, "Partitura ainda não processada")
-    name = Path(_read_meta(d)["filename"]).stem + ".musicxml"
+    if layout == "combined":
+        with _edit_lock:
+            data = f.read_bytes()
+        return Response(combine_staves(data), media_type="application/vnd.recordare.musicxml+xml")
+    meta = _read_meta(d)
+    name = (meta.get("title") or Path(meta["filename"]).stem) + ".musicxml"
     return FileResponse(
         f,
         media_type="application/vnd.recordare.musicxml+xml",
@@ -251,10 +391,14 @@ def restore_lyrics(score_id: str) -> dict:
 
 
 @app.get("/api/scores/{score_id}/source")
-def get_source(score_id: str) -> FileResponse:
+def get_source(score_id: str, part: int = 0) -> FileResponse:
+    """The uploaded file; for a score combined from parts, `part` picks which one (0-based)."""
     d = _dir(score_id)
     meta = _read_meta(d)
-    return FileResponse(d / meta["source"], filename=meta["filename"], content_disposition_type="inline")
+    sources = meta.get("sources") or [{"file": meta["source"], "filename": meta["filename"]}]
+    if not 0 <= part < len(sources):
+        raise HTTPException(404, "Parte não encontrada")
+    return FileResponse(d / sources[part]["file"], filename=sources[part]["filename"], content_disposition_type="inline")
 
 
 if VENDOR_DIR.exists():

@@ -8,6 +8,11 @@ from pathlib import Path
 
 AUDIVERIS_BIN = os.environ.get("AUDIVERIS_BIN", "/opt/audiveris/bin/Audiveris")
 OMR_TIMEOUT = int(os.environ.get("OMR_TIMEOUT", "900"))
+# PDFs are rasterised at this resolution. Audiveris' default (300 dpi) leaves the staff lines of
+# typical hymn sheets ~18 px apart, and it then misses many hollow noteheads and whole rests;
+# at 400 dpi recognition is much better. Pages too large for Audiveris at 400 dpi
+# (> LoadStep.maxPixelCount, ~A3) are retried at the default resolution.
+PDF_DPI = int(os.environ.get("OMR_PDF_DPI", "400"))
 
 
 class OMRError(RuntimeError):
@@ -21,6 +26,19 @@ def run_audiveris(source: Path, out_dir: Path) -> Path:
     movements; in that case the first movement is returned.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    if source.suffix.lower() == ".pdf" and PDF_DPI:
+        try:
+            xml = _run(source, out_dir, [f"org.audiveris.omr.image.ImageLoading.pdfResolution={PDF_DPI}"])
+            if "Too large image" not in (out_dir / "audiveris.log").read_text(errors="replace"):
+                return xml
+        except OMRError:
+            pass
+        for f in [*out_dir.glob(f"{source.stem}*.xml"), *out_dir.glob(f"{source.stem}*.omr")]:
+            f.unlink()
+    return _run(source, out_dir, [])
+
+
+def _run(source: Path, out_dir: Path, constants: list[str]) -> Path:
     cmd = [
         AUDIVERIS_BIN,
         "-batch",
@@ -29,6 +47,7 @@ def run_audiveris(source: Path, out_dir: Path) -> Path:
         str(out_dir),
         "-constant",
         "org.audiveris.omr.sheet.BookManager.useCompression=false",
+        *[arg for c in constants for arg in ("-constant", c)],
         "--",
         str(source),
     ]
